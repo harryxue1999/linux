@@ -10,8 +10,8 @@
  */
 
 /*
- * This OTG and Embedded Host Whitelist is "Targeted Peripheral List".
- * It should mostly use of USB_DEVICE() or USB_DEVICE_VER() entries..
+ * This OTG Whitelist is the OTG "Targeted Peripheral List".  It should
+ * mostly use of USB_DEVICE() or USB_DEVICE_VER() entries..
  *
  * YOU _SHOULD_ CHANGE THIS LIST TO MATCH YOUR PRODUCT AND ITS TESTING!
  */
@@ -48,7 +48,7 @@ static struct usb_device_id whitelist_table [] = {
 /* gadget zero, for testing */
 //{ USB_DEVICE(0x0525, 0xa4a0), },
 #endif
-
+   
 /* OPT Tester */
 { USB_DEVICE( 0x1a0a, 0x0101 ), }, /* TEST_SE0_NAK */
 { USB_DEVICE( 0x1a0a, 0x0102 ), }, /* Test_J */
@@ -59,9 +59,9 @@ static struct usb_device_id whitelist_table [] = {
 { USB_DEVICE( 0x1a0a, 0x0107 ), }, /* SINGLE_STEP_GET_DESCRIPTOR setup */
 { USB_DEVICE( 0x1a0a, 0x0108 ), }, /* SINGLE_STEP_GET_DESCRIPTOR execute */
 
-/* Sony cameras */
+/* Sony cameras */        
 { USB_DEVICE_VER(0x054c,0x0010,0x0410, 0x0500), },
-
+   
 /* Memory Devices */
 //{ USB_DEVICE( 0x0781, 0x5150 ), }, /* SanDisk */
 //{ USB_DEVICE( 0x05DC, 0x0080 ), }, /* Lexar */
@@ -89,7 +89,7 @@ static inline void report_errors(struct usb_device *dev)
 		 le16_to_cpu(dev->descriptor.idProduct));
         if (USB_CLASS_HUB == dev->descriptor.bDeviceClass){
                 dev_printk(KERN_CRIT, &dev->dev, "Unsupported Hub Topology\n");
-        } else {
+        } else {        
                 dev_printk(KERN_CRIT, &dev->dev, "Attached Device is not Supported\n");
         }
 }
@@ -99,49 +99,26 @@ static int is_targeted(struct usb_device *dev)
 {
 	struct usb_device_id	*id = whitelist_table;
 
-	/* HNP test device is _never_ targeted (see OTG spec 6.6.6) */
-	if ((le16_to_cpu(dev->descriptor.idVendor) == 0x1a0a &&
-	     le16_to_cpu(dev->descriptor.idProduct) == 0xbadd))
-		return 0;
-
-	/* OTG PET device is always targeted (see OTG 2.0 ECN 6.4.2) */
-	if ((le16_to_cpu(dev->descriptor.idVendor) == 0x1a0a &&
-	     le16_to_cpu(dev->descriptor.idProduct) == 0x0200))
+	/* possible in developer configs only! */
+	if (!dev->bus->otg_port)
 		return 1;
 
-	/* NOTE: can't use usb_match_id() since interface caches
-	 * aren't set up yet. this is cut/paste from that code.
-	 */
-	for (id = whitelist_table; id->match_flags; id++) {
-		if ((id->match_flags & USB_DEVICE_ID_MATCH_VENDOR) &&
-		    id->idVendor != le16_to_cpu(dev->descriptor.idVendor))
-			continue;
+	/* HNP test device is _never_ targeted (see OTG spec 6.6.6) */
+	if (dev->descriptor.idVendor == 0x1a0a && 
+            dev->descriptor.idProduct == 0xbadd) {
+                return 0;
+	} else if (!enable_whitelist) {
+		return 1;
+        } else {
 
-		if ((id->match_flags & USB_DEVICE_ID_MATCH_PRODUCT) &&
-		    id->idProduct != le16_to_cpu(dev->descriptor.idProduct))
-			continue;
-
-		/* No need to test id->bcdDevice_lo != 0, since 0 is never
-		   greater than any unsigned number. */
-		if ((id->match_flags & USB_DEVICE_ID_MATCH_DEV_LO) &&
-		    (id->bcdDevice_lo > le16_to_cpu(dev->descriptor.bcdDevice)))
-			continue;
-
-		if ((id->match_flags & USB_DEVICE_ID_MATCH_DEV_HI) &&
-		    (id->bcdDevice_hi < le16_to_cpu(dev->descriptor.bcdDevice)))
-			continue;
-
-		if ((id->match_flags & USB_DEVICE_ID_MATCH_DEV_CLASS) &&
-		    (id->bDeviceClass != dev->descriptor.bDeviceClass))
-			continue;
-
-		if ((id->match_flags & USB_DEVICE_ID_MATCH_DEV_SUBCLASS) &&
-		    (id->bDeviceSubClass != dev->descriptor.bDeviceSubClass))
-			continue;
-
-		if ((id->match_flags & USB_DEVICE_ID_MATCH_DEV_PROTOCOL) &&
-		    (id->bDeviceProtocol != dev->descriptor.bDeviceProtocol))
-			continue;
+#ifdef DEBUG
+                dev_dbg(&dev->dev, "device V:%04x P:%04x DC:%04x SC:%04x PR:%04x \n",
+                        dev->descriptor.idVendor,
+                        dev->descriptor.idProduct,
+                        dev->descriptor.bDeviceClass,
+                        dev->descriptor.bDeviceSubClass,
+                        dev->descriptor.bDeviceProtocol);
+#endif
 
 		return 1;
 		/* NOTE: can't use usb_match_id() since interface caches
@@ -149,14 +126,14 @@ static int is_targeted(struct usb_device *dev)
 		 */
 		for (id = whitelist_table; id->match_flags; id++) {
 #ifdef DEBUG
-			dev_dbg(&dev->dev,
+			dev_dbg(&dev->dev, 
 				"ID: V:%04x P:%04x DC:%04x SC:%04x PR:%04x \n",
 				id->idVendor,
 				id->idProduct,
 				id->bDeviceClass,
 				id->bDeviceSubClass,
 				id->bDeviceProtocol);
-#endif
+#endif			      
 
 			if ((id->match_flags & USB_DEVICE_ID_MATCH_VENDOR) &&
 			    id->idVendor != le16_to_cpu(dev->descriptor.idVendor))
@@ -194,7 +171,16 @@ static int is_targeted(struct usb_device *dev)
 
 	/* add other match criteria here ... */
 
+#ifdef	CONFIG_USB_OTG_WHITELIST
 	report_errors(dev);
 	return 0;
+#else
+	if (enable_whitelist) {
+		report_errors(dev);
+		return 0;
+	} else {
+		return 1;
+	}
+#endif
 }
 

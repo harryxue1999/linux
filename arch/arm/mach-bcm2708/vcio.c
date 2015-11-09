@@ -61,7 +61,7 @@
 #define MBOX_DATA28_LSB(msg)		(((uint32_t)msg) >> 4)
 
 #define MBOX_MAGIC 0xd0d0c0de
-static struct class *vcio_class = NULL;
+
 struct vc_mailbox {
 	struct device *dev;	/* parent device */
 	void __iomem *status;
@@ -287,26 +287,26 @@ EXPORT_SYMBOL_GPL(bcm_mailbox_property);
  *	Platform Device for Mailbox
  * -------------------------------------------------------------------- */
 
-/*
+/* 
  * Is the device open right now? Used to prevent
- * concurent access into the same device
+ * concurent access into the same device 
  */
 static int Device_Open = 0;
 
-/*
- * This is called whenever a process attempts to open the device file
+/* 
+ * This is called whenever a process attempts to open the device file 
  */
 static int device_open(struct inode *inode, struct file *file)
 {
-	/*
-	 * We don't want to talk to two processes at the same time
+	/* 
+	 * We don't want to talk to two processes at the same time 
 	 */
 	if (Device_Open)
 		return -EBUSY;
 
 	Device_Open++;
 	/*
-	 * Initialize the message
+	 * Initialize the message 
 	 */
 	try_module_get(THIS_MODULE);
 	return 0;
@@ -314,8 +314,8 @@ static int device_open(struct inode *inode, struct file *file)
 
 static int device_release(struct inode *inode, struct file *file)
 {
-	/*
-	 * We're now ready for our next caller
+	/* 
+	 * We're now ready for our next caller 
 	 */
 	Device_Open--;
 
@@ -323,7 +323,7 @@ static int device_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-/*
+/* 
  * This function is called whenever a process tries to do an ioctl on our
  * device file. We get two extra parameters (additional to the inode and file
  * structures, which all device functions get): the number of the ioctl called
@@ -338,15 +338,15 @@ static long device_ioctl(struct file *file,	/* see include/linux/fs.h */
 		 unsigned long ioctl_param)
 {
 	unsigned size;
-	/*
-	 * Switch according to the ioctl called
+	/* 
+	 * Switch according to the ioctl called 
 	 */
 	switch (ioctl_num) {
 	case IOCTL_MBOX_PROPERTY:
-		/*
+		/* 
 		 * Receive a pointer to a message (in user space) and set that
-		 * to be the device's message.  Get the parameter given to
-		 * ioctl by the process.
+		 * to be the device's message.  Get the parameter given to 
+		 * ioctl by the process. 
 		 */
 		mbox_copy_from_user(&size, (void *)ioctl_param, sizeof size);
 		return bcm_mailbox_property((void *)ioctl_param, size);
@@ -361,12 +361,12 @@ static long device_ioctl(struct file *file,	/* see include/linux/fs.h */
 
 /* Module Declarations */
 
-/*
+/* 
  * This structure will hold the functions to be called
  * when a process does something to the device we
  * created. Since a pointer to this structure is kept in
  * the devices table, it can't be local to
- * init_module. NULL is for unimplemented functios.
+ * init_module. NULL is for unimplemented functios. 
  */
 struct file_operations fops = {
 	.unlocked_ioctl = device_ioctl,
@@ -408,26 +408,19 @@ static int bcm_vcio_probe(struct platform_device *pdev)
 	}
 
 	if (ret == 0) {
-		/*
+		/* 
 		 * Register the character device
 		 */
 		ret = register_chrdev(MAJOR_NUM, DEVICE_FILE_NAME, &fops);
 
-		/*
-		 * Negative values signify an error
+		/* 
+		 * Negative values signify an error 
 		 */
 		if (ret < 0) {
 			printk(KERN_ERR DRIVER_NAME
 			       "Failed registering the character device %d\n", ret);
 			return ret;
 		}
-		vcio_class = class_create(THIS_MODULE, BCM_VCIO_DRIVER_NAME);
-		if (IS_ERR(vcio_class)) {
-		    ret = PTR_ERR(vcio_class);
-		   return ret ;
-		}
-		device_create(vcio_class, NULL, MKDEV(MAJOR_NUM, 0), NULL,
-                      "vcio");
 	}
 	return ret;
 }
@@ -462,16 +455,13 @@ static int __init bcm_mbox_init(void)
 	if (ret != 0) {
 		printk(KERN_ERR DRIVER_NAME ": failed to register "
 		       "on platform\n");
-	}
+	} 
 
 	return ret;
 }
 
 static void __exit bcm_mbox_exit(void)
 {
-	device_destroy(vcio_class,MKDEV(MAJOR_NUM, 0));
-	class_destroy(vcio_class);
-	unregister_chrdev(MAJOR_NUM, DEVICE_FILE_NAME);
 	platform_driver_unregister(&bcm_mbox_driver);
 }
 

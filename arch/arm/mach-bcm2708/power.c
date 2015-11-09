@@ -24,10 +24,7 @@
 #define BCM_POWER_NOCLIENT (1<<31)
 
 /* Some drivers expect there devices to be permanently powered */
-
-#ifdef CONFIG_USB
 #define BCM_POWER_ALWAYS_ON (BCM_POWER_USB)
-#endif
 
 #if 1
 #define DPRINTK printk

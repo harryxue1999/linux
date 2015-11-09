@@ -59,7 +59,6 @@ extern "C" {
 # ifdef CONFIG_DEBUG_MUTEXES
 #  include <linux/mutex.h>
 # endif
-# include <linux/spinlock.h>
 # include <linux/errno.h>
 # include <stdarg.h>
 #endif
@@ -250,7 +249,7 @@ extern void DWC_EXCEPTION(char *format, ...)
 #ifndef DWC_OTG_DEBUG_LEV
 #define DWC_OTG_DEBUG_LEV 0
 #endif
-
+   
 #ifdef DEBUG
 /**
  * Prints out a debug message.  Used for logging/trace messages.
@@ -693,7 +692,7 @@ extern void *dwc_alloc_atomic_debug(void *mem_ctx, uint32_t size, char const *fu
 extern void dwc_free_debug(void *mem_ctx, void *addr, char const *func, int line);
 extern void *dwc_dma_alloc_debug(void *dma_ctx, uint32_t size, dwc_dma_t *dma_addr,
 				 char const *func, int line);
-extern void *dwc_dma_alloc_atomic_debug(void *dma_ctx, uint32_t size, dwc_dma_t *dma_addr,
+extern void *dwc_dma_alloc_atomic_debug(void *dma_ctx, uint32_t size, dwc_dma_t *dma_addr, 
 				char const *func, int line);
 extern void dwc_dma_free_debug(void *dma_ctx, uint32_t size, void *virt_addr,
 			       dwc_dma_t dma_addr, char const *func, int line);
@@ -1040,22 +1039,9 @@ typedef unsigned long dwc_irqflags_t;
 /** Returns an initialized lock variable.  This function should allocate and
  * initialize the OS-specific data structure used for locking.  This data
  * structure is to be used for the DWC_LOCK and DWC_UNLOCK functions and should
- * be freed by the DWC_FREE_LOCK when it is no longer used.
- *
- * For Linux Spinlock Debugging make it macro because the debugging routines use
- * the symbol name to determine recursive locking. Using a wrapper function
- * makes it falsely think recursive locking occurs. */
-#if defined(DWC_LINUX) && defined(CONFIG_DEBUG_SPINLOCK)
-#define DWC_SPINLOCK_ALLOC_LINUX_DEBUG(lock) ({ \
-	lock = DWC_ALLOC(sizeof(spinlock_t)); \
-	if (lock) { \
-		spin_lock_init((spinlock_t *)lock); \
-	} \
-})
-#else
+ * be freed by the DWC_FREE_LOCK when it is no longer used. */
 extern dwc_spinlock_t *DWC_SPINLOCK_ALLOC(void);
 #define dwc_spinlock_alloc(_ctx_) DWC_SPINLOCK_ALLOC()
-#endif
 
 /** Frees an initialized lock variable. */
 extern void DWC_SPINLOCK_FREE(dwc_spinlock_t *lock);

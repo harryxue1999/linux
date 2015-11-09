@@ -64,26 +64,20 @@ struct bcm2708_dma_cb {
 	unsigned long next;
 	unsigned long pad[2];
 };
-struct scatterlist;
 
 extern int bcm_sg_suitable_for_dma(struct scatterlist *sg_ptr, int sg_len);
 extern void bcm_dma_start(void __iomem *dma_chan_base,
 			  dma_addr_t control_block);
 extern void bcm_dma_wait_idle(void __iomem *dma_chan_base);
-extern bool bcm_dma_is_busy(void __iomem *dma_chan_base);
 extern int /*rc*/ bcm_dma_abort(void __iomem *dma_chan_base);
 
 /* When listing features we can ask for when allocating DMA channels give
    those with higher priority smaller ordinal numbers */
 #define BCM_DMA_FEATURE_FAST_ORD 0
 #define BCM_DMA_FEATURE_BULK_ORD 1
-#define BCM_DMA_FEATURE_NORMAL_ORD 2
-#define BCM_DMA_FEATURE_LITE_ORD 3
 #define BCM_DMA_FEATURE_FAST	 (1<<BCM_DMA_FEATURE_FAST_ORD)
 #define BCM_DMA_FEATURE_BULK	 (1<<BCM_DMA_FEATURE_BULK_ORD)
-#define BCM_DMA_FEATURE_NORMAL	 (1<<BCM_DMA_FEATURE_NORMAL_ORD)
-#define BCM_DMA_FEATURE_LITE	 (1<<BCM_DMA_FEATURE_LITE_ORD)
-#define BCM_DMA_FEATURE_COUNT	 4
+#define BCM_DMA_FEATURE_COUNT	 2
 
 /* return channel no or -ve error */
 extern int bcm_dma_chan_alloc(unsigned preferred_feature_set,

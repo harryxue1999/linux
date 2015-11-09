@@ -27,3 +27,4 @@ extern void __init vc_cma_reserve(void);
 #endif
 
 #endif /* VC_CMA_H */
+

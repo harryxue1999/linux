@@ -311,7 +311,7 @@ extern int dwc_otg_set_param_phy_utmi_width(dwc_otg_core_if_t * core_if,
 					    int32_t val);
 extern int32_t dwc_otg_get_param_phy_utmi_width(dwc_otg_core_if_t * core_if);
 //#define dwc_param_phy_utmi_width_default 16
-#define dwc_param_phy_utmi_width_default 8 // Broadcom BCM2708
+#define dwc_param_phy_utmi_width_default 8 // Broadcom BCM2708 
 
 /**
  * Specifies whether the ULPI operates at double or single

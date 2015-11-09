@@ -17,6 +17,7 @@
 
 #include <linux/kernel.h>
 #include <linux/errno.h>
+#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
@@ -189,7 +190,7 @@ exit:
 	retval = usb_submit_urb(urb, GFP_ATOMIC);
 	if (retval)
 		dev_err(&port->dev,
-			"%s - usb_submit_urb failed with result %d\n",
+			"%s - usb_submit_urb failed with result %d",
 			__func__, retval);
 }
 

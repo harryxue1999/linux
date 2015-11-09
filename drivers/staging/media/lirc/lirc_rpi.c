@@ -30,8 +30,6 @@
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/time.h>
-#include <linux/timex.h>
-#include <linux/timekeeping.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/platform_device.h>
@@ -39,15 +37,11 @@
 #include <linux/spinlock.h>
 #include <media/lirc.h>
 #include <media/lirc_dev.h>
-#include <mach/gpio.h>
 #include <linux/gpio.h>
-#include <linux/of_platform.h>
-
-#include <linux/platform_data/bcm2708.h>
 
 #define LIRC_DRIVER_NAME "lirc_rpi"
 #define RBUF_LEN 256
-#define LIRC_TRANSMITTER_LATENCY 50
+#define LIRC_TRANSMITTER_LATENCY 256
 
 #ifndef MAX_UDELAY_MS
 #define MAX_UDELAY_US 5000
@@ -66,8 +60,6 @@
 
 /* set the default GPIO input pin */
 static int gpio_in_pin = 18;
-/* set the default pull behaviour for input pin */
-static int gpio_in_pull = BCM2708_PULL_DOWN;
 /* set the default GPIO output pin */
 static int gpio_out_pin = 17;
 /* enable debugging messages */
@@ -80,12 +72,16 @@ static bool softcarrier = 1;
 static bool invert = 0;
 
 struct gpio_chip *gpiochip;
-static int irq_num;
+struct irq_chip *irqchip;
+struct irq_data *irqdata;
 
 /* forward declarations */
 static long send_pulse(unsigned long length);
 static void send_space(long length);
 static void lirc_rpi_exit(void);
+
+int valid_gpio_pins[] = { 0, 1, 4, 8, 7, 9, 10, 11, 14, 15, 17, 18, 21, 22, 23,
+	24, 25 };
 
 static struct platform_device *lirc_rpi_dev;
 static struct timeval lasttv = { 0, 0 };
@@ -108,25 +104,22 @@ static void safe_udelay(unsigned long usecs)
 	udelay(usecs);
 }
 
-static unsigned long read_current_us(void)
-{
-	struct timespec now;
-	getnstimeofday(&now);
-	return (now.tv_sec * 1000000) + (now.tv_nsec/1000);
-}
-
 static int init_timing_params(unsigned int new_duty_cycle,
 	unsigned int new_freq)
 {
-	if (1000 * 1000000L / new_freq * new_duty_cycle / 100 <=
+	/*
+	 * period, pulse/space width are kept with 8 binary places -
+	 * IE multiplied by 256.
+	 */
+	if (256 * 1000000L / new_freq * new_duty_cycle / 100 <=
 	    LIRC_TRANSMITTER_LATENCY)
 		return -EINVAL;
-	if (1000 * 1000000L / new_freq * (100 - new_duty_cycle) / 100 <=
+	if (256 * 1000000L / new_freq * (100 - new_duty_cycle) / 100 <=
 	    LIRC_TRANSMITTER_LATENCY)
 		return -EINVAL;
 	duty_cycle = new_duty_cycle;
 	freq = new_freq;
-	period = 1000 * 1000000L / freq;
+	period = 256 * 1000000L / freq;
 	pulse_width = period * duty_cycle / 100;
 	space_width = period - pulse_width;
 	dprintk("in init_timing_params, freq=%d pulse=%ld, "
@@ -137,14 +130,11 @@ static int init_timing_params(unsigned int new_duty_cycle,
 static long send_pulse_softcarrier(unsigned long length)
 {
 	int flag;
-	unsigned long actual, target;
-	unsigned long actual_us, initial_us, target_us;
+	unsigned long actual, target, d;
 
-	length *= 1000;
+	length <<= 8;
 
 	actual = 0; target = 0; flag = 0;
-	actual_us = read_current_us();
-
 	while (actual < length) {
 		if (flag) {
 			gpiochip->set(gpiochip, gpio_out_pin, invert);
@@ -153,19 +143,17 @@ static long send_pulse_softcarrier(unsigned long length)
 			gpiochip->set(gpiochip, gpio_out_pin, !invert);
 			target += pulse_width;
 		}
-		initial_us = actual_us;
-		target_us = actual_us + (target - actual) / 1000;
+		d = (target - actual -
+		     LIRC_TRANSMITTER_LATENCY + 128) >> 8;
 		/*
 		 * Note - we've checked in ioctl that the pulse/space
 		 * widths are big enough so that d is > 0
 		 */
-		if  ((int)(target_us - actual_us) > 0)
-			udelay(target_us - actual_us);
-		actual_us = read_current_us();
-		actual += (actual_us - initial_us) * 1000;
+		udelay(d);
+		actual += (d << 8) + LIRC_TRANSMITTER_LATENCY;
 		flag = !flag;
 	}
-	return (actual-length) / 1000;
+	return (actual-length) >> 8;
 }
 
 static long send_pulse(unsigned long length)
@@ -253,6 +241,9 @@ static irqreturn_t irq_handler(int i, void *blah, struct pt_regs *regs)
 	/* use the GPIO signal level */
 	signal = gpiochip->get(gpiochip, gpio_in_pin);
 
+	/* unmask the irq */
+	irqchip->irq_unmask(irqdata);
+
 	if (sense != -1) {
 		/* get current time */
 		do_gettimeofday(&tv);
@@ -304,121 +295,43 @@ static int is_right_chip(struct gpio_chip *chip, void *data)
 	return 0;
 }
 
-static inline int read_bool_property(const struct device_node *np,
-				     const char *propname,
-				     bool *out_value)
-{
-	u32 value = 0;
-	int err = of_property_read_u32(np, propname, &value);
-	if (err == 0)
-		*out_value = (value != 0);
-	return err;
-}
-
-static void read_pin_settings(struct device_node *node)
-{
-	u32 pin;
-	int index;
-
-	for (index = 0;
-	     of_property_read_u32_index(
-		     node,
-		     "brcm,pins",
-		     index,
-		     &pin) == 0;
-	     index++) {
-		u32 function;
-		int err;
-		err = of_property_read_u32_index(
-			node,
-			"brcm,function",
-			index,
-			&function);
-		if (err == 0) {
-			if (function == 1) /* Output */
-				gpio_out_pin = pin;
-			else if (function == 0) /* Input */
-				gpio_in_pin = pin;
-		}
-	}
-}
-
 static int init_port(void)
 {
-	int i, nlow, nhigh, ret;
-	struct device_node *node;
-
-	node = lirc_rpi_dev->dev.of_node;
+	int i, nlow, nhigh, ret, irq;
 
 	gpiochip = gpiochip_find("bcm2708_gpio", is_right_chip);
 
-	/*
-	 * Because of the lack of a setpull function, only support
-	 * pinctrl-bcm2835 if using device tree.
-	*/
-	if (!gpiochip && node)
-		gpiochip = gpiochip_find("pinctrl-bcm2835", is_right_chip);
-
-	if (!gpiochip) {
-		pr_err(LIRC_DRIVER_NAME ": gpio chip not found!\n");
+	if (!gpiochip)
 		return -ENODEV;
+
+	if (gpio_request(gpio_out_pin, LIRC_DRIVER_NAME " ir/out")) {
+		printk(KERN_ALERT LIRC_DRIVER_NAME
+		       ": cant claim gpio pin %d\n", gpio_out_pin);
+		ret = -ENODEV;
+		goto exit_init_port;
 	}
 
-	if (node) {
-		struct device_node *pins_node;
-
-		pins_node = of_parse_phandle(node, "pinctrl-0", 0);
-		if (!pins_node) {
-			printk(KERN_ERR LIRC_DRIVER_NAME
-			       ": pinctrl settings not found!\n");
-			ret = -EINVAL;
-			goto exit_init_port;
-		}
-
-		read_pin_settings(pins_node);
-
-		of_property_read_u32(node, "rpi,sense", &sense);
-
-		read_bool_property(node, "rpi,softcarrier", &softcarrier);
-
-		read_bool_property(node, "rpi,invert", &invert);
-
-		read_bool_property(node, "rpi,debug", &debug);
-
-	}
-	else
-	{
-		if (gpio_in_pin >= BCM2708_NR_GPIOS ||
-		    gpio_out_pin >= BCM2708_NR_GPIOS) {
-			ret = -EINVAL;
-			printk(KERN_ERR LIRC_DRIVER_NAME
-			       ": invalid GPIO pin(s) specified!\n");
-			goto exit_init_port;
-		}
-
-		if (gpio_request(gpio_out_pin, LIRC_DRIVER_NAME " ir/out")) {
-			printk(KERN_ALERT LIRC_DRIVER_NAME
-			       ": cant claim gpio pin %d\n", gpio_out_pin);
-			ret = -ENODEV;
-			goto exit_init_port;
-		}
-
-		if (gpio_request(gpio_in_pin, LIRC_DRIVER_NAME " ir/in")) {
-			printk(KERN_ALERT LIRC_DRIVER_NAME
-			       ": cant claim gpio pin %d\n", gpio_in_pin);
-			ret = -ENODEV;
-			goto exit_gpio_free_out_pin;
-		}
-
-		bcm2708_gpio_setpull(gpiochip, gpio_in_pin, gpio_in_pull);
-		gpiochip->direction_input(gpiochip, gpio_in_pin);
-		gpiochip->direction_output(gpiochip, gpio_out_pin, 1);
+	if (gpio_request(gpio_in_pin, LIRC_DRIVER_NAME " ir/in")) {
+		printk(KERN_ALERT LIRC_DRIVER_NAME
+		       ": cant claim gpio pin %d\n", gpio_in_pin);
+		ret = -ENODEV;
+		goto exit_gpio_free_out_pin;
 	}
 
+	gpiochip->direction_input(gpiochip, gpio_in_pin);
+	gpiochip->direction_output(gpiochip, gpio_out_pin, 1);
 	gpiochip->set(gpiochip, gpio_out_pin, invert);
 
-	irq_num = gpiochip->to_irq(gpiochip, gpio_in_pin);
-	dprintk("to_irq %d\n", irq_num);
+	irq = gpiochip->to_irq(gpiochip, gpio_in_pin);
+	dprintk("to_irq %d\n", irq);
+	irqdata = irq_get_irq_data(irq);
+
+	if (irqdata && irqdata->chip) {
+		irqchip = irqdata->chip;
+	} else {
+		ret = -ENODEV;
+		goto exit_gpio_free_in_pin;
+	}
 
 	/* if pin is high, then this must be an active low receiver. */
 	if (sense == -1) {
@@ -450,6 +363,9 @@ static int init_port(void)
 
 	return 0;
 
+	exit_gpio_free_in_pin:
+	gpio_free(gpio_in_pin);
+
 	exit_gpio_free_out_pin:
 	gpio_free(gpio_out_pin);
 
@@ -461,20 +377,20 @@ static int init_port(void)
 static int set_use_inc(void *data)
 {
 	int result;
+	unsigned long flags;
 
 	/* initialize timestamp */
 	do_gettimeofday(&lasttv);
 
-	result = request_irq(irq_num,
-			     (irq_handler_t) irq_handler,
-			     IRQ_TYPE_EDGE_RISING | IRQ_TYPE_EDGE_FALLING,
+	result = request_irq(gpiochip->to_irq(gpiochip, gpio_in_pin),
+			     (irq_handler_t) irq_handler, 0,
 			     LIRC_DRIVER_NAME, (void*) 0);
 
 	switch (result) {
 	case -EBUSY:
 		printk(KERN_ERR LIRC_DRIVER_NAME
 		       ": IRQ %d is busy\n",
-		       irq_num);
+		       gpiochip->to_irq(gpiochip, gpio_in_pin));
 		return -EBUSY;
 	case -EINVAL:
 		printk(KERN_ERR LIRC_DRIVER_NAME
@@ -482,26 +398,43 @@ static int set_use_inc(void *data)
 		return -EINVAL;
 	default:
 		dprintk("Interrupt %d obtained\n",
-			irq_num);
+			gpiochip->to_irq(gpiochip, gpio_in_pin));
 		break;
 	};
 
 	/* initialize pulse/space widths */
 	init_timing_params(duty_cycle, freq);
 
+	spin_lock_irqsave(&lock, flags);
+
+	/* GPIO Pin Falling/Rising Edge Detect Enable */
+	irqchip->irq_set_type(irqdata,
+			      IRQ_TYPE_EDGE_RISING | IRQ_TYPE_EDGE_FALLING);
+
+	/* unmask the irq */
+	irqchip->irq_unmask(irqdata);
+
+	spin_unlock_irqrestore(&lock, flags);
+
 	return 0;
 }
 
 static void set_use_dec(void *data)
 {
-	/* GPIO Pin Falling/Rising Edge Detect Disable */
-	irq_set_irq_type(irq_num, 0);
-	disable_irq(irq_num);
+	unsigned long flags;
 
-	free_irq(irq_num, (void *) 0);
+	spin_lock_irqsave(&lock, flags);
+
+	/* GPIO Pin Falling/Rising Edge Detect Disable */
+	irqchip->irq_set_type(irqdata, 0);
+	irqchip->irq_mask(irqdata);
+
+	spin_unlock_irqrestore(&lock, flags);
+
+	free_irq(gpiochip->to_irq(gpiochip, gpio_in_pin), (void *) 0);
 
 	dprintk(KERN_INFO LIRC_DRIVER_NAME
-		": freed IRQ %d\n", irq_num);
+		": freed IRQ %d\n", gpiochip->to_irq(gpiochip, gpio_in_pin));
 }
 
 static ssize_t lirc_write(struct file *file, const char *buf,
@@ -608,23 +541,15 @@ static struct lirc_driver driver = {
 	.owner		= THIS_MODULE,
 };
 
-static const struct of_device_id lirc_rpi_of_match[] = {
-	{ .compatible = "rpi,lirc-rpi", },
-	{},
-};
-MODULE_DEVICE_TABLE(of, lirc_rpi_of_match);
-
 static struct platform_driver lirc_rpi_driver = {
 	.driver = {
 		.name   = LIRC_DRIVER_NAME,
 		.owner  = THIS_MODULE,
-		.of_match_table = of_match_ptr(lirc_rpi_of_match),
 	},
 };
 
 static int __init lirc_rpi_init(void)
 {
-	struct device_node *node;
 	int result;
 
 	/* Init read buffer. */
@@ -639,26 +564,15 @@ static int __init lirc_rpi_init(void)
 		goto exit_buffer_free;
 	}
 
-	node = of_find_compatible_node(NULL, NULL,
-				       lirc_rpi_of_match[0].compatible);
-
-	if (node) {
-		/* DT-enabled */
-		lirc_rpi_dev = of_find_device_by_node(node);
-		WARN_ON(lirc_rpi_dev->dev.of_node != node);
-		of_node_put(node);
+	lirc_rpi_dev = platform_device_alloc(LIRC_DRIVER_NAME, 0);
+	if (!lirc_rpi_dev) {
+		result = -ENOMEM;
+		goto exit_driver_unregister;
 	}
-	else {
-		lirc_rpi_dev = platform_device_alloc(LIRC_DRIVER_NAME, 0);
-		if (!lirc_rpi_dev) {
-			result = -ENOMEM;
-			goto exit_driver_unregister;
-		}
 
-		result = platform_device_add(lirc_rpi_dev);
-		if (result)
-			goto exit_device_put;
-	}
+	result = platform_device_add(lirc_rpi_dev);
+	if (result)
+		goto exit_device_put;
 
 	return 0;
 
@@ -676,19 +590,36 @@ static int __init lirc_rpi_init(void)
 
 static void lirc_rpi_exit(void)
 {
-	if (!lirc_rpi_dev->dev.of_node)
-		platform_device_unregister(lirc_rpi_dev);
+	platform_device_unregister(lirc_rpi_dev);
 	platform_driver_unregister(&lirc_rpi_driver);
 	lirc_buffer_free(&rbuf);
 }
 
 static int __init lirc_rpi_init_module(void)
 {
-	int result;
+	int result, i;
 
 	result = lirc_rpi_init();
 	if (result)
 		return result;
+
+	/* check if the module received valid gpio pin numbers */
+	result = 0;
+	if (gpio_in_pin != gpio_out_pin) {
+		for(i = 0; (i < ARRAY_SIZE(valid_gpio_pins)) && (result != 2); i++) {
+			if (gpio_in_pin == valid_gpio_pins[i] ||
+			   gpio_out_pin == valid_gpio_pins[i]) {
+				result++;
+			}
+		}
+	}
+
+	if (result != 2) {
+		result = -EINVAL;
+		printk(KERN_ERR LIRC_DRIVER_NAME
+		       ": invalid GPIO pin(s) specified!\n");
+		goto exit_rpi;
+	}
 
 	result = init_port();
 	if (result < 0)
@@ -721,13 +652,12 @@ static int __init lirc_rpi_init_module(void)
 
 static void __exit lirc_rpi_exit_module(void)
 {
-	lirc_unregister_driver(driver.minor);
-
 	gpio_free(gpio_out_pin);
 	gpio_free(gpio_in_pin);
 
 	lirc_rpi_exit();
 
+	lirc_unregister_driver(driver.minor);
 	printk(KERN_INFO LIRC_DRIVER_NAME ": cleaned up module\n");
 }
 
@@ -741,15 +671,13 @@ MODULE_LICENSE("GPL");
 
 module_param(gpio_out_pin, int, S_IRUGO);
 MODULE_PARM_DESC(gpio_out_pin, "GPIO output/transmitter pin number of the BCM"
-		 " processor. (default 17");
+		 " processor. Valid pin numbers are: 0, 1, 4, 8, 7, 9, 10, 11,"
+		 " 14, 15, 17, 18, 21, 22, 23, 24, 25, default 17");
 
 module_param(gpio_in_pin, int, S_IRUGO);
 MODULE_PARM_DESC(gpio_in_pin, "GPIO input pin number of the BCM processor."
-		 " (default 18");
-
-module_param(gpio_in_pull, int, S_IRUGO);
-MODULE_PARM_DESC(gpio_in_pull, "GPIO input pin pull configuration."
-		 " (0 = off, 1 = up, 2 = down, default down)");
+		 " Valid pin numbers are: 0, 1, 4, 8, 7, 9, 10, 11, 14, 15,"
+		 " 17, 18, 21, 22, 23, 24, 25, default 18");
 
 module_param(sense, int, S_IRUGO);
 MODULE_PARM_DESC(sense, "Override autodetection of IR receiver circuit"

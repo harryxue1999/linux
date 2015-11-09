@@ -5,7 +5,7 @@
 * agreement governing use of this software, this software is licensed to you
 * under the terms of the GNU General Public License version 2, available at
 * http://www.broadcom.com/licenses/GPLv2.php (the "GPL").
-*
+*	
 * Notwithstanding the above, under no circumstances may you combine this
 * software in any way with any other Broadcom software provided under a
 * license other than the GPL, without Broadcom's express prior written
@@ -63,12 +63,6 @@ struct vc_msg {
 /* ---------- GLOBALS ---------- */
 static struct cpufreq_driver bcm2835_cpufreq_driver;	/* the cpufreq driver global */
 
-static struct cpufreq_frequency_table bcm2835_freq_table[] = {
-	{0, 0, 0},
-	{0, 0, 0},
-	{0, 0, CPUFREQ_TABLE_END},
-};
-
 /*
  ===============================================
   clk_rate either gets or sets the clock rates.
@@ -78,26 +72,26 @@ static uint32_t bcm2835_cpufreq_set_clock(int cur_rate, int arm_rate)
 {
 	int s, actual_rate=0;
 	struct vc_msg msg;
-
+	
 	/* wipe all previous message data */
 	memset(&msg, 0, sizeof msg);
-
+	
 	msg.msg_size = sizeof msg;
-
+			
 	msg.tag.tag_id = VCMSG_SET_CLOCK_RATE;
 	msg.tag.buffer_size = 8;
 	msg.tag.data_size = 8;   /* we're sending the clock ID and the new rates which is a total of 2 words */
 	msg.tag.dev_id = VCMSG_ID_ARM_CLOCK;
 	msg.tag.val = arm_rate * 1000;
-
+			
 	/* send the message */
 	s = bcm_mailbox_property(&msg, sizeof msg);
-
+	
 	/* check if it was all ok and return the rate in KHz */
 	if (s == 0 && (msg.request_code & 0x80000000))
 		actual_rate = msg.tag.val/1000;
 
-	print_debug("Setting new frequency = %d -> %d (actual %d)\n", cur_rate, arm_rate, actual_rate);
+	print_debug("Setting new frequency = %d -> %d (actual %d)\n", cur_rate, arm_rate, actual_rate);	
 	return actual_rate;
 }
 
@@ -106,16 +100,16 @@ static uint32_t bcm2835_cpufreq_get_clock(int tag)
 	int s;
 	int arm_rate = 0;
 	struct vc_msg msg;
-
+	
 	/* wipe all previous message data */
 	memset(&msg, 0, sizeof msg);
-
+	
 	msg.msg_size = sizeof msg;
 	msg.tag.tag_id = tag;
 	msg.tag.buffer_size = 8;
 	msg.tag.data_size = 4; /* we're just sending the clock ID which is one word long */
 	msg.tag.dev_id = VCMSG_ID_ARM_CLOCK;
-
+	
 	/* send the message */
 	s = bcm_mailbox_property(&msg, sizeof msg);
 
@@ -128,7 +122,7 @@ static uint32_t bcm2835_cpufreq_get_clock(int tag)
 		tag == VCMSG_GET_MIN_CLOCK ? "Min":
 		tag == VCMSG_GET_MAX_CLOCK ? "Max":
 		"Unexpected", arm_rate);
-
+	
 	return arm_rate;
 }
 
@@ -138,7 +132,7 @@ static uint32_t bcm2835_cpufreq_get_clock(int tag)
  ====================================================
 */
 static int __init bcm2835_cpufreq_module_init(void)
-{
+{	
 	print_debug("IN\n");
 	return cpufreq_register_driver(&bcm2835_cpufreq_driver);
 }
@@ -162,58 +156,78 @@ static void __exit bcm2835_cpufreq_module_exit(void)
 */
 static int bcm2835_cpufreq_driver_init(struct cpufreq_policy *policy)
 {
-	/* measured value of how long it takes to change frequency */
-	const unsigned int transition_latency = 355000; /* ns */
+	/* measured value of how long it takes to change frequency */	
+	policy->cpuinfo.transition_latency = 355000; /* ns */
 
 	/* now find out what the maximum and minimum frequencies are */
-	bcm2835_freq_table[0].frequency = bcm2835_cpufreq_get_clock(VCMSG_GET_MIN_CLOCK);
-	bcm2835_freq_table[1].frequency = bcm2835_cpufreq_get_clock(VCMSG_GET_MAX_CLOCK);
-
-	print_info("min=%d max=%d\n", bcm2835_freq_table[0].frequency, bcm2835_freq_table[1].frequency);
-	return cpufreq_generic_init(policy, bcm2835_freq_table, transition_latency);
-}
-
-/*
- =====================================================================
-  Target index function chooses the requested frequency from the table
- =====================================================================
-*/
-
-static int bcm2835_cpufreq_driver_target_index(struct cpufreq_policy *policy, unsigned int state)
-{
-	unsigned int target_freq = bcm2835_freq_table[state].frequency;
-	unsigned int cur = bcm2835_cpufreq_set_clock(policy->cur, target_freq);
-
-	if (!cur)
-	{
-		print_err("Error occurred setting a new frequency (%d)\n", target_freq);
-		return -EINVAL;
-	}
-	print_debug("%s: %i: freq %d->%d\n", policy->governor->name, state, policy->cur, cur);
+	policy->min = policy->cpuinfo.min_freq = bcm2835_cpufreq_get_clock(VCMSG_GET_MIN_CLOCK);
+	policy->max = policy->cpuinfo.max_freq = bcm2835_cpufreq_get_clock(VCMSG_GET_MAX_CLOCK);
+	policy->cur = bcm2835_cpufreq_get_clock(VCMSG_GET_CLOCK_RATE);
+	
+	print_info("min=%d max=%d cur=%d\n", policy->min, policy->max, policy->cur);
 	return 0;
 }
 
 /*
- ======================================================
-  Get function returns the current frequency from table
- ======================================================
+ =================================================================================
+  Target function chooses the most appropriate frequency from the table to enable
+ =================================================================================
 */
+
+static int bcm2835_cpufreq_driver_target(struct cpufreq_policy *policy, unsigned int target_freq, unsigned int relation)
+{
+	unsigned int target = target_freq;
+	unsigned int cur = policy->cur;
+	print_debug("%s: min=%d max=%d cur=%d target=%d\n",policy->governor->name,policy->min,policy->max,policy->cur,target_freq);
+	
+	/* if we are above min and using ondemand, then just use max */
+	if (strcmp("ondemand", policy->governor->name)==0 && target > policy->min)
+		target = policy->max;
+	/* if the frequency is the same, just quit */
+	if (target == policy->cur)
+		return 0;
+
+	/* otherwise were good to set the clock frequency */
+	policy->cur = bcm2835_cpufreq_set_clock(policy->cur, target);
+	
+	if (!policy->cur)
+	{
+		print_err("Error occurred setting a new frequency (%d)!\n", target);
+		policy->cur = bcm2835_cpufreq_get_clock(VCMSG_GET_CLOCK_RATE);
+		return -EINVAL;
+	}
+	print_debug("Freq %d->%d (min=%d max=%d target=%d request=%d)\n", cur, policy->cur, policy->min, policy->max, target_freq, target);
+	return 0;
+}
 
 static unsigned int bcm2835_cpufreq_driver_get(unsigned int cpu)
 {
 	unsigned int actual_rate = bcm2835_cpufreq_get_clock(VCMSG_GET_CLOCK_RATE);
-	print_debug("%d: freq=%d\n", cpu, actual_rate);
-	return actual_rate <= bcm2835_freq_table[0].frequency ? bcm2835_freq_table[0].frequency : bcm2835_freq_table[1].frequency;
+	print_debug("cpu=%d\n", actual_rate);
+	return actual_rate;
 }
+
+/*
+ =================================================================================
+  Verify ensures that when a policy is changed, it is suitable for the CPU to use
+ =================================================================================
+*/
+
+static int bcm2835_cpufreq_driver_verify(struct cpufreq_policy *policy)
+{
+	print_info("switching to governor %s\n", policy->governor->name);
+	return 0;
+}
+
 
 /* the CPUFreq driver */
 static struct cpufreq_driver bcm2835_cpufreq_driver = {
-	.name         = "BCM2835 CPUFreq",
-	.init         = bcm2835_cpufreq_driver_init,
-	.verify       = cpufreq_generic_frequency_table_verify,
-	.target_index = bcm2835_cpufreq_driver_target_index,
-	.get          = bcm2835_cpufreq_driver_get,
-	.attr         = cpufreq_generic_attr,
+		.name   = "BCM2835 CPUFreq",
+		.owner  = THIS_MODULE,
+		.init   = bcm2835_cpufreq_driver_init,
+		.verify = bcm2835_cpufreq_driver_verify,
+		.target = bcm2835_cpufreq_driver_target,
+		.get    = bcm2835_cpufreq_driver_get
 };
 
 MODULE_AUTHOR("Dorian Peake and Dom Cobley");
@@ -222,3 +236,4 @@ MODULE_LICENSE("GPL");
 
 module_init(bcm2835_cpufreq_module_init);
 module_exit(bcm2835_cpufreq_module_exit);
+

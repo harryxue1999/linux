@@ -59,8 +59,6 @@
 #include "dwc_otg_driver.h"
 #include "dwc_otg_dbg.h"
 
-extern bool fiq_enable;
-
 static struct gadget_wrapper {
 	dwc_otg_pcd_t *pcd;
 
@@ -363,14 +361,14 @@ static int ep_queue(struct usb_ep *usb_ep, struct usb_request *usb_req,
 	if (GET_CORE_IF(pcd)->dma_enable) {
                 dwc_otg_device_t *otg_dev = gadget_wrapper->pcd->otg_dev;
                 struct device *dev = NULL;
-
+                
                 if (otg_dev != NULL)
                         dev = DWC_OTG_OS_GETDEV(otg_dev->os_dep);
-
+                
 		if (usb_req->length != 0 &&
                     usb_req->dma == DWC_DMA_ADDR_INVALID) {
                         dma_addr = dma_map_single(dev, usb_req->buf,
-                                                  usb_req->length,
+                                                  usb_req->length, 
                                                   ep->dwc_ep.is_in ?
                                                         DMA_TO_DEVICE:
                                                         DMA_FROM_DEVICE);
@@ -650,7 +648,7 @@ static struct usb_ep_ops dwc_otg_pcd_ep_ops = {
 	/* .set_wedge = ep_wedge, */
         .set_wedge = NULL, /* uses set_halt instead */
 #endif
-
+        
 	.queue = ep_queue,
 	.dequeue = ep_dequeue,
 
@@ -1224,13 +1222,13 @@ int pcd_init(dwc_bus_dev_t *_dev)
 	 */
 #ifdef PLATFORM_INTERFACE
 	DWC_DEBUGPL(DBG_ANY, "registering handler for irq%d\n",
-                    platform_get_irq(_dev, fiq_enable ? 0 : 1));
-	retval = request_irq(platform_get_irq(_dev, fiq_enable ? 0 : 1), dwc_otg_pcd_irq,
+                    platform_get_irq(_dev, 0));
+	retval = request_irq(platform_get_irq(_dev, 0), dwc_otg_pcd_irq,
 			     IRQF_SHARED, gadget_wrapper->gadget.name,
 			     otg_dev->pcd);
 	if (retval != 0) {
 		DWC_ERROR("request of irq%d failed\n",
-                          platform_get_irq(_dev, fiq_enable ? 0 : 1));
+                          platform_get_irq(_dev, 0));
 		free_wrapper(gadget_wrapper);
 		return -EBUSY;
 	}

@@ -56,7 +56,6 @@
 #include "dwc_otg_core_if.h"
 #include "dwc_otg_pcd_if.h"
 #include "dwc_otg_hcd_if.h"
-#include "dwc_otg_fiq_fsm.h"
 
 #define DWC_DRIVER_VERSION	"3.00a 10-AUG-2012"
 #define DWC_DRIVER_DESC		"HS OTG USB Controller driver"
@@ -65,6 +64,7 @@ bool microframe_schedule=true;
 
 static const char dwc_driver_name[] = "dwc_otg";
 
+extern void* dummy_send;
 
 extern int pcd_init(
 #ifdef LM_INTERFACE
@@ -240,14 +240,13 @@ static struct dwc_otg_driver_module_params dwc_otg_module_params = {
 	.adp_enable = -1,
 };
 
-//Global variable to switch the fiq fix on or off
-bool fiq_enable = 1;
+//Global variable to switch the fiq fix on or off (declared in bcm2708.c)
+extern bool fiq_fix_enable;
 // Global variable to enable the split transaction fix
-bool fiq_fsm_enable = true;
-//Bulk split-transaction NAK holdoff in microframes
-uint16_t nak_holdoff = 8;
+bool fiq_split_enable = true;
+//Global variable to switch the nak holdoff on or off
+bool nak_holdoff_enable = true;
 
-unsigned short fiq_fsm_mask = 0x07;
 
 /**
  * This function shows the Driver Version.
@@ -580,11 +579,11 @@ static irqreturn_t dwc_otg_common_irq(int irq, void *dev)
  * @param _dev
  */
 #ifdef LM_INTERFACE
-#define REM_RETVAL(n)
+#define REM_RETVAL(n) 
 static void dwc_otg_driver_remove(	 struct lm_device *_dev )
 {       dwc_otg_device_t *otg_dev = lm_get_drvdata(_dev);
 #elif  defined(PCI_INTERFACE)
-#define REM_RETVAL(n)
+#define REM_RETVAL(n) 
 static void dwc_otg_driver_remove(	 struct pci_dev *_dev )
 {	dwc_otg_device_t *otg_dev = pci_get_drvdata(_dev);
 #elif  defined(PLATFORM_INTERFACE)
@@ -629,7 +628,7 @@ static int dwc_otg_driver_remove(        struct platform_device *_dev )
         } else {
 		DWC_DEBUGPL(DBG_ANY, "%s: There is no installed irq!\n", __func__);
 		return REM_RETVAL(-ENXIO);
-	}
+	}  
 
 	if (otg_dev->core_if) {
 		dwc_otg_cil_remove(otg_dev->core_if);
@@ -707,7 +706,7 @@ static int dwc_otg_driver_probe(
 	}
 	dev_dbg(&_dev->dev, "start=0x%08x\n", (unsigned)pci_resource_start(_dev,0));
 	/* other stuff needed as well? */
-
+        
 #elif  defined(PLATFORM_INTERFACE)
 	dev_dbg(&_dev->dev, "start=0x%08x (len 0x%x)\n",
                 (unsigned)_dev->resource->start,
@@ -801,7 +800,7 @@ static int dwc_otg_driver_probe(
 	dwc_otg_device->os_dep.base = ioremap_nocache(_dev->resource[0].start,
                                                       _dev->resource[0].end -
                                                       _dev->resource[0].start+1);
-	if (fiq_enable)
+	if (fiq_fix_enable)
 	{
 		if (!request_mem_region(_dev->resource[1].start,
 	                                _dev->resource[1].end - _dev->resource[1].start + 1,
@@ -814,6 +813,7 @@ static int dwc_otg_driver_probe(
 		dwc_otg_device->os_dep.mphi_base = ioremap_nocache(_dev->resource[1].start,
 							    _dev->resource[1].end -
 							    _dev->resource[1].start + 1);
+		dummy_send = (void *) kmalloc(16, GFP_ATOMIC);
 	}
 
 #else
@@ -851,7 +851,7 @@ static int dwc_otg_driver_probe(
 	dwc_otg_device->core_if = dwc_otg_cil_init(dwc_otg_device->os_dep.base);
         DWC_DEBUGPL(DBG_HCDV, "probe of device %p given core_if %p\n",
                     dwc_otg_device, dwc_otg_device->core_if);//GRAYG
-
+        
 	if (!dwc_otg_device->core_if) {
 		dev_err(&_dev->dev, "CIL initialization failed!\n");
 		retval = -ENOMEM;
@@ -900,11 +900,11 @@ static int dwc_otg_driver_probe(
 	 * Install the interrupt handler for the common interrupts before
 	 * enabling common interrupts in core_init below.
 	 */
-
+        
 #if defined(PLATFORM_INTERFACE)
-	devirq = platform_get_irq(_dev, fiq_enable ? 0 : 1);
+        devirq = platform_get_irq(_dev, 0);
 #else
-	devirq = _dev->irq;
+        devirq = _dev->irq;
 #endif
 	DWC_DEBUGPL(DBG_CIL, "registering (common) handler for irq%d\n",
 		    devirq);
@@ -932,13 +932,13 @@ static int dwc_otg_driver_probe(
                     );
 #endif
 #endif /*IRQF_TRIGGER_LOW*/
-
+        
 	/*
 	 * Initialize the DWC_otg core.
 	 */
 	dev_dbg(&_dev->dev, "Calling dwc_otg_core_init\n");
 	dwc_otg_core_init(dwc_otg_device->core_if);
-
+		
 #ifndef DWC_HOST_ONLY
 	/*
 	 * Initialize the PCD
@@ -949,7 +949,7 @@ static int dwc_otg_driver_probe(
 		DWC_ERROR("pcd_init failed\n");
 		dwc_otg_device->pcd = NULL;
 		goto fail;
-	}
+	}	
 #endif
 #ifndef DWC_DEVICE_ONLY
 	/*
@@ -975,15 +975,15 @@ static int dwc_otg_driver_probe(
 
 	/*
 	 * Enable the global interrupt after all the interrupt
-	 * handlers are installed if there is no ADP support else
+	 * handlers are installed if there is no ADP support else 
 	 * perform initial actions required for Internal ADP logic.
 	 */
-	if (!dwc_otg_get_param_adp_enable(dwc_otg_device->core_if)) {
+	if (!dwc_otg_get_param_adp_enable(dwc_otg_device->core_if)) {	
 	        dev_dbg(&_dev->dev, "Calling enable_global_interrupts\n");
 		dwc_otg_enable_global_interrupts(dwc_otg_device->core_if);
 	        dev_dbg(&_dev->dev, "Done\n");
 	} else
-		dwc_otg_adp_start(dwc_otg_device->core_if,
+		dwc_otg_adp_start(dwc_otg_device->core_if, 
 							dwc_otg_is_host_mode(dwc_otg_device->core_if));
 
 	return 0;
@@ -1048,10 +1048,10 @@ static struct platform_driver dwc_otg_driver = {
 		.name = (char *)dwc_driver_name,
 		},
         .id_table = platform_ids,
-
+                        
 	.probe = dwc_otg_driver_probe,
 	.remove = dwc_otg_driver_remove,
-        // no 'shutdown', 'suspend', 'resume', 'suspend_late' or 'resume_early'
+        // no 'shutdown', 'suspend', 'resume', 'suspend_late' or 'resume_early' 
 };
 #endif
 
@@ -1071,9 +1071,9 @@ static int __init dwc_otg_driver_init(void)
 	int error;
         struct device_driver *drv;
 
-	if(fiq_fsm_enable && !fiq_enable) {
-		printk(KERN_WARNING "dwc_otg: fiq_fsm_enable was set without fiq_enable! Correcting.\n");
-		fiq_enable = 1;
+	if(fiq_split_enable && !fiq_fix_enable) {
+		printk(KERN_WARNING "dwc_otg: fiq_split_enable was set without fiq_fix_enable! Correcting.\n");
+		fiq_fix_enable = 1;
 	}
 
 	printk(KERN_INFO "%s: version %s (%s bus)\n", dwc_driver_name,
@@ -1095,9 +1095,9 @@ static int __init dwc_otg_driver_init(void)
 		printk(KERN_ERR "%s retval=%d\n", __func__, retval);
 		return retval;
 	}
-	printk(KERN_DEBUG "dwc_otg: FIQ %s\n", fiq_enable ? "enabled":"disabled");
-	printk(KERN_DEBUG "dwc_otg: NAK holdoff %s\n", nak_holdoff ? "enabled":"disabled");
-	printk(KERN_DEBUG "dwc_otg: FIQ split-transaction FSM %s\n", fiq_fsm_enable ? "enabled":"disabled");
+	printk(KERN_DEBUG "dwc_otg: FIQ %s\n", fiq_fix_enable ? "enabled":"disabled");
+	printk(KERN_DEBUG "dwc_otg: NAK holdoff %s\n", nak_holdoff_enable ? "enabled":"disabled");
+	printk(KERN_DEBUG "dwc_otg: FIQ split fix %s\n", fiq_split_enable ? "enabled":"disabled");
 
 	error = driver_create_file(drv, &driver_attr_version);
 #ifdef DEBUG
@@ -1378,19 +1378,12 @@ MODULE_PARM_DESC(otg_ver, "OTG revision supported 0=OTG 1.3 1=OTG 2.0");
 module_param(microframe_schedule, bool, 0444);
 MODULE_PARM_DESC(microframe_schedule, "Enable the microframe scheduler");
 
-module_param(fiq_enable, bool, 0444);
-MODULE_PARM_DESC(fiq_enable, "Enable the FIQ");
-module_param(nak_holdoff, ushort, 0644);
-MODULE_PARM_DESC(nak_holdoff, "Throttle duration for bulk split-transaction endpoints on a NAK. Default 8");
-module_param(fiq_fsm_enable, bool, 0444);
-MODULE_PARM_DESC(fiq_fsm_enable, "Enable the FIQ to perform split transactions as defined by fiq_fsm_mask");
-module_param(fiq_fsm_mask, ushort, 0444);
-MODULE_PARM_DESC(fiq_fsm_mask, "Bitmask of transactions to perform in the FIQ.\n"
-					"Bit 0 : Non-periodic split transactions\n"
-					"Bit 1 : Periodic split transactions\n"
-					"Bit 2 : High-speed multi-transfer isochronous\n"
-					"All other bits should be set 0.");
-
+module_param(fiq_fix_enable, bool, 0444);
+MODULE_PARM_DESC(fiq_fix_enable, "Enable the fiq fix");
+module_param(nak_holdoff_enable, bool, 0444);
+MODULE_PARM_DESC(nak_holdoff_enable, "Enable the NAK holdoff");
+module_param(fiq_split_enable, bool, 0444);
+MODULE_PARM_DESC(fiq_split_enable, "Enable the FIQ fix on split transactions");
 
 /** @page "Module Parameters"
  *
@@ -1590,7 +1583,7 @@ MODULE_PARM_DESC(fiq_fsm_mask, "Bitmask of transactions to perform in the FIQ.\n
  - 0: Disabled (default)
  - 1: Enabled
  </td></tr>
-
+ 
  <tr>
  <td>en_multiple_tx_fifo</td>
  <td>Specifies whether dedicatedto tx fifos are enabled for non periodic IN EPs.
@@ -1621,7 +1614,7 @@ MODULE_PARM_DESC(fiq_fsm_mask, "Bitmask of transactions to perform in the FIQ.\n
 
 <tr>
  <td>thr_ctl</td>
- <td>Specifies whether to enable Thresholding for Device mode. Bits 0, 1, 2 of
+ <td>Specifies whether to enable Thresholding for Device mode. Bits 0, 1, 2 of 
  this parmater specifies if thresholding is enabled for non-Iso Tx, Iso Tx and
  Rx transfers accordingly.
  The driver will automatically detect the value for this parameter if none is
@@ -1674,7 +1667,7 @@ MODULE_PARM_DESC(fiq_fsm_mask, "Bitmask of transactions to perform in the FIQ.\n
  The driver will automatically detect the value for this parameter if none is
  specified.
  - 0: IC_USB disabled (default, if available)
- - 1: IC_USB enable
+ - 1: IC_USB enable 
  </td></tr>
 
 <tr>
@@ -1691,7 +1684,7 @@ MODULE_PARM_DESC(fiq_fsm_mask, "Bitmask of transactions to perform in the FIQ.\n
  - 0: Power Down disabled (default)
  - 2: Power Down enabled
  </td></tr>
-
+ 
  <tr>
  <td>reload_ctl</td>
  <td>Specifies whether dynamic reloading of the HFIR register is allowed during
@@ -1713,9 +1706,9 @@ MODULE_PARM_DESC(fiq_fsm_mask, "Bitmask of transactions to perform in the FIQ.\n
 
  <tr>
  <td>cont_on_bna</td>
- <td>Specifies whether Enable Continue on BNA enabled or no.
+ <td>Specifies whether Enable Continue on BNA enabled or no. 
  After receiving BNA interrupt the core disables the endpoint,when the
- endpoint is re-enabled by the application the
+ endpoint is re-enabled by the application the  
  - 0: Core starts processing from the DOEPDMA descriptor (default)
  - 1: Core starts processing from the descriptor which received the BNA.
  This parameter is valid only when OTG_EN_DESC_DMA == 1b1.
@@ -1724,7 +1717,7 @@ MODULE_PARM_DESC(fiq_fsm_mask, "Bitmask of transactions to perform in the FIQ.\n
  <tr>
  <td>ahb_single</td>
  <td>This bit when programmed supports SINGLE transfers for remainder data
- in a transfer for DMA mode of operation.
+ in a transfer for DMA mode of operation. 
  - 0: The remainder data will be sent using INCR burst size (default)
  - 1: The remainder data will be sent using SINGLE burst size.
  </td></tr>
@@ -1743,7 +1736,7 @@ MODULE_PARM_DESC(fiq_fsm_mask, "Bitmask of transactions to perform in the FIQ.\n
  <td>Specifies whether OTG is performing as USB OTG Revision 2.0 or Revision 1.3
  USB OTG device.
  - 0: OTG 2.0 support disabled (default)
- - 1: OTG 2.0 support enabled
+ - 1: OTG 2.0 support enabled 
  </td></tr>
 
 */

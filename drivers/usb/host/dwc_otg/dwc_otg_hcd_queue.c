@@ -7,7 +7,7 @@
  * Synopsys HS OTG Linux Software Driver and documentation (hereinafter,
  * "Software") is an Unsupported proprietary work of Synopsys, Inc. unless
  * otherwise expressly agreed to in writing between Synopsys and you.
- *
+ * 
  * The Software IS NOT an item of Licensed Software or Licensed Product under
  * any End User Software License Agreement or Agreement for Licensed Product
  * with Synopsys or any supplement thereto. You are permitted to use and
@@ -17,7 +17,7 @@
  * any information contained herein except pursuant to this license grant from
  * Synopsys. If you do not agree with this notice, including the disclaimer
  * below, then you are not authorized to use the Software.
- *
+ * 
  * THIS SOFTWARE IS BEING DISTRIBUTED BY SYNOPSYS SOLELY ON AN "AS IS" BASIS
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -41,10 +41,11 @@
 
 #include "dwc_otg_hcd.h"
 #include "dwc_otg_regs.h"
+#include "dwc_otg_mphi_fix.h"
 
 extern bool microframe_schedule;
 
-/**
+/** 
  * Free each QTD in the QH's QTD-list then free the QH.  QH should already be
  * removed from a list.  QTD list should already be empty if called from URB
  * Dequeue.
@@ -55,10 +56,9 @@ extern bool microframe_schedule;
 void dwc_otg_hcd_qh_free(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 {
 	dwc_otg_qtd_t *qtd, *qtd_tmp;
-	dwc_irqflags_t flags;
 
 	/* Free each QTD in the QTD list */
-	DWC_SPINLOCK_IRQSAVE(hcd->lock, &flags);
+	DWC_SPINLOCK(hcd->lock);
 	DWC_CIRCLEQ_FOREACH_SAFE(qtd, qtd_tmp, &qh->qtd_list, qtd_list_entry) {
 		DWC_CIRCLEQ_REMOVE(&qh->qtd_list, qtd, qtd_list_entry);
 		dwc_otg_hcd_qtd_free(qtd);
@@ -77,7 +77,7 @@ void dwc_otg_hcd_qh_free(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 	}
 
 	DWC_FREE(qh);
-	DWC_SPINUNLOCK_IRQRESTORE(hcd->lock, flags);
+	DWC_SPINUNLOCK(hcd->lock);
 	return;
 }
 
@@ -146,13 +146,13 @@ static uint32_t calc_bus_time(int speed, int is_in, int is_isoc, int bytecount)
 	return NS_TO_US(retval);
 }
 
-/**
+/** 
  * Initializes a QH structure.
  *
  * @param hcd The HCD state structure for the DWC OTG controller.
  * @param qh  The QH to init.
  * @param urb Holds the information about the device/endpoint that we need
- * 	      to initialize the QH.
+ * 	      to initialize the QH. 
  */
 #define SCHEDULE_SLOP 10
 void qh_init(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh, dwc_otg_hcd_urb_t * urb)
@@ -173,7 +173,7 @@ void qh_init(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh, dwc_otg_hcd_urb_t * urb)
 	DWC_LIST_INIT(&qh->qh_list_entry);
 	qh->channel = NULL;
 
-	/* FS/LS Enpoint on HS Hub
+	/* FS/LS Enpoint on HS Hub 
 	 * NOT virtual root hub */
 	dev_speed = hcd->fops->speed(hcd, urb->priv);
 
@@ -576,6 +576,7 @@ static int check_max_xfer_size(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 }
 
 
+extern int g_next_sched_frame, g_np_count, g_np_sent;
 
 /**
  * Schedules an interrupt or isochronous transfer in the periodic schedule.
@@ -635,9 +636,9 @@ static int schedule_periodic(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 		DWC_LIST_INSERT_TAIL(&hcd->periodic_sched_ready, &qh->qh_list_entry);
 	}
 	else {
-		if(fiq_enable && (DWC_LIST_EMPTY(&hcd->periodic_sched_inactive) || dwc_frame_num_le(qh->sched_frame, hcd->fiq_state->next_sched_frame)))
+		if(DWC_LIST_EMPTY(&hcd->periodic_sched_inactive) || dwc_frame_num_le(qh->sched_frame, g_next_sched_frame))
 		{
-			hcd->fiq_state->next_sched_frame = qh->sched_frame;
+			g_next_sched_frame = qh->sched_frame;
 
 		}
 		/* Always start in the inactive schedule. */
@@ -678,20 +679,13 @@ int dwc_otg_hcd_qh_add(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 		/* Always start in the inactive schedule. */
 		DWC_LIST_INSERT_TAIL(&hcd->non_periodic_sched_inactive,
 				     &qh->qh_list_entry);
-		//hcd->fiq_state->kick_np_queues = 1;
+		g_np_count++;
 	} else {
 		status = schedule_periodic(hcd, qh);
 		if ( !hcd->periodic_qh_count ) {
 			intr_mask.b.sofintr = 1;
-			if (fiq_enable) {
-				local_fiq_disable();
-				fiq_fsm_spin_lock(&hcd->fiq_state->lock);
-				DWC_MODIFY_REG32(&hcd->core_if->core_global_regs->gintmsk, intr_mask.d32, intr_mask.d32);
-				fiq_fsm_spin_unlock(&hcd->fiq_state->lock);
-				local_fiq_enable();
-			} else {
-				DWC_MODIFY_REG32(&hcd->core_if->core_global_regs->gintmsk, intr_mask.d32, intr_mask.d32);
-			}
+			DWC_MODIFY_REG32(&hcd->core_if->core_global_regs->gintmsk,
+								intr_mask.d32, intr_mask.d32);
 		}
 		hcd->periodic_qh_count++;
 	}
@@ -724,7 +718,7 @@ static void deschedule_periodic(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 	}
 }
 
-/**
+/** 
  * Removes a QH from either the non-periodic or periodic schedule.  Memory is
  * not freed.
  *
@@ -745,22 +739,16 @@ void dwc_otg_hcd_qh_remove(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
 			    hcd->non_periodic_qh_ptr->next;
 		}
 		DWC_LIST_REMOVE_INIT(&qh->qh_list_entry);
-		//if (!DWC_LIST_EMPTY(&hcd->non_periodic_sched_inactive))
-		//	hcd->fiq_state->kick_np_queues = 1;
+
+		// If we've removed the last non-periodic entry then there are none left!
+		g_np_count = g_np_sent;
 	} else {
 		deschedule_periodic(hcd, qh);
 		hcd->periodic_qh_count--;
-		if( !hcd->periodic_qh_count && !fiq_fsm_enable ) {
+		if( !hcd->periodic_qh_count ) {
 			intr_mask.b.sofintr = 1;
-			if (fiq_enable) {
-				local_fiq_disable();
-				fiq_fsm_spin_lock(&hcd->fiq_state->lock);
-				DWC_MODIFY_REG32(&hcd->core_if->core_global_regs->gintmsk, intr_mask.d32, 0);
-				fiq_fsm_spin_unlock(&hcd->fiq_state->lock);
-				local_fiq_enable();
-			} else {
-				DWC_MODIFY_REG32(&hcd->core_if->core_global_regs->gintmsk, intr_mask.d32, 0);
-			}
+				DWC_MODIFY_REG32(&hcd->core_if->core_global_regs->gintmsk,
+									intr_mask.d32, 0);
 		}
 	}
 }
@@ -780,13 +768,30 @@ void dwc_otg_hcd_qh_remove(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh)
  */
 void dwc_otg_hcd_qh_deactivate(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh,
 			       int sched_next_periodic_split)
-{
+{	
 	if (dwc_qh_is_non_per(qh)) {
+
+		dwc_otg_qh_t *qh_tmp;
+		dwc_list_link_t *qh_list;
+		DWC_LIST_FOREACH(qh_list, &hcd->non_periodic_sched_inactive)
+		{
+			qh_tmp = DWC_LIST_ENTRY(qh_list, struct dwc_otg_qh, qh_list_entry);
+			if(qh_tmp == qh)
+			{
+				/*
+				 *  FIQ is being disabled because this one nevers gets a np_count increment
+				 *  This is still not absolutely correct, but it should fix itself with
+				 *  just an unnecessary extra interrupt
+				 */
+				g_np_sent = g_np_count;
+			}
+		}
+
+
 		dwc_otg_hcd_qh_remove(hcd, qh);
 		if (!DWC_CIRCLEQ_EMPTY(&qh->qtd_list)) {
 			/* Add back to inactive non-periodic schedule. */
 			dwc_otg_hcd_qh_add(hcd, qh);
-			//hcd->fiq_state->kick_np_queues = 1;
 		}
 	} else {
 		uint16_t frame_number = dwc_otg_hcd_get_frame_number(hcd);
@@ -845,9 +850,9 @@ void dwc_otg_hcd_qh_deactivate(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh,
 				DWC_LIST_MOVE_HEAD(&hcd->periodic_sched_ready,
 						   &qh->qh_list_entry);
 			} else {
-				if(fiq_enable && !dwc_frame_num_le(hcd->fiq_state->next_sched_frame, qh->sched_frame))
+				if(!dwc_frame_num_le(g_next_sched_frame, qh->sched_frame))
 				{
-					hcd->fiq_state->next_sched_frame = qh->sched_frame;
+					g_next_sched_frame = qh->sched_frame;
 				}
 
 				DWC_LIST_MOVE_HEAD
@@ -858,8 +863,8 @@ void dwc_otg_hcd_qh_deactivate(dwc_otg_hcd_t * hcd, dwc_otg_qh_t * qh,
 	}
 }
 
-/**
- * This function allocates and initializes a QTD.
+/** 
+ * This function allocates and initializes a QTD. 
  *
  * @param urb The URB to create a QTD from.  Each URB-QTD pair will end up
  * 	      pointing to each other so each pair should have a unique correlation.
@@ -879,7 +884,7 @@ dwc_otg_qtd_t *dwc_otg_hcd_qtd_create(dwc_otg_hcd_urb_t * urb, int atomic_alloc)
 	return qtd;
 }
 
-/**
+/** 
  * Initializes a QTD structure.
  *
  * @param qtd The QTD to initialize.
@@ -938,9 +943,6 @@ int dwc_otg_hcd_qtd_add(dwc_otg_qtd_t * qtd,
 		if (*qh == NULL) {
 			retval = -DWC_E_NO_MEMORY;
 			goto done;
-		} else {
-			if (fiq_enable)
-				hcd->fiq_state->kick_np_queues = 1;
 		}
 	}
 	retval = dwc_otg_hcd_qh_add(hcd, *qh);

@@ -33,24 +33,17 @@
 #define MBOX_CHAN_PROPERTY 8 /* for use by the property channel */
 #define MBOX_CHAN_COUNT    9
 
-enum {
-	VCMSG_PROCESS_REQUEST 		= 0x00000000
-};
-enum {
-	VCMSG_REQUEST_SUCCESSFUL 	= 0x80000000,
-	VCMSG_REQUEST_FAILED 		= 0x80000001
-};
 /* Mailbox property tags */
 enum {
 	VCMSG_PROPERTY_END               = 0x00000000,
 	VCMSG_GET_FIRMWARE_REVISION      = 0x00000001,
 	VCMSG_GET_BOARD_MODEL            = 0x00010001,
-	VCMSG_GET_BOARD_REVISION	 = 0x00010002,
-	VCMSG_GET_BOARD_MAC_ADDRESS	 = 0x00010003,
-	VCMSG_GET_BOARD_SERIAL		 = 0x00010004,
-	VCMSG_GET_ARM_MEMORY		 = 0x00010005,
-	VCMSG_GET_VC_MEMORY		 = 0x00010006,
-	VCMSG_GET_CLOCKS		 = 0x00010007,
+	VCMSG_GET_BOARD_REVISION	 = 0x00020002,
+	VCMSG_GET_BOARD_MAC_ADDRESS	 = 0x00020003,
+	VCMSG_GET_BOARD_SERIAL		 = 0x00020004,
+	VCMSG_GET_ARM_MEMORY		 = 0x00020005,
+	VCMSG_GET_VC_MEMORY		 = 0x00020006,
+	VCMSG_GET_CLOCKS		 = 0x00020007,
 	VCMSG_GET_COMMAND_LINE           = 0x00050001,
 	VCMSG_GET_DMA_CHANNELS           = 0x00060001,
 	VCMSG_GET_POWER_STATE            = 0x00020001,
@@ -68,20 +61,7 @@ enum {
 	VCMSG_GET_MIN_CLOCK              = 0x00030007,
 	VCMSG_GET_MIN_VOLTAGE            = 0x00030008,
 	VCMSG_GET_TURBO                  = 0x00030009,
-	VCMSG_GET_MAX_TEMPERATURE        = 0x0003000a,
-	VCMSG_GET_STC                    = 0x0003000b,
 	VCMSG_SET_TURBO                  = 0x00038009,
-	VCMSG_SET_ALLOCATE_MEM           = 0x0003000c,
-	VCMSG_SET_LOCK_MEM               = 0x0003000d,
-	VCMSG_SET_UNLOCK_MEM             = 0x0003000e,
-	VCMSG_SET_RELEASE_MEM            = 0x0003000f,
-	VCMSG_SET_EXECUTE_CODE           = 0x00030010,
-	VCMSG_SET_EXECUTE_QPU            = 0x00030011,
-	VCMSG_SET_ENABLE_QPU             = 0x00030012,
-	VCMSG_GET_RESOURCE_HANDLE        = 0x00030014,
-	VCMSG_GET_EDID_BLOCK             = 0x00030020,
-	VCMSG_GET_CUSTOMER_OTP           = 0x00030021,
-	VCMSG_SET_CUSTOMER_OTP           = 0x00038021,
 	VCMSG_SET_ALLOCATE_BUFFER        = 0x00040001,
 	VCMSG_SET_RELEASE_BUFFER         = 0x00048001,
 	VCMSG_SET_BLANK_SCREEN           = 0x00040002,
@@ -119,10 +99,6 @@ enum {
 	VCMSG_GET_TRANSFORM              = 0x0004000d,
 	VCMSG_TST_TRANSFORM              = 0x0004400d,
 	VCMSG_SET_TRANSFORM              = 0x0004800d,
-	VCMSG_TST_VSYNC                  = 0x0004400e,
-	VCMSG_SET_VSYNC                  = 0x0004800e,
-	VCMSG_SET_CURSOR_INFO            = 0x00008010,
-	VCMSG_SET_CURSOR_STATE           = 0x00008011,
 };
 
 extern int /*rc*/ bcm_mailbox_read(unsigned chan, uint32_t *data28);
@@ -131,35 +107,35 @@ extern int /*rc*/ bcm_mailbox_property(void *data, int size);
 
 #include <linux/ioctl.h>
 
-/*
- * The major device number. We can't rely on dynamic
- * registration any more, because ioctls need to know
- * it.
+/* 
+ * The major device number. We can't rely on dynamic 
+ * registration any more, because ioctls need to know 
+ * it. 
  */
 #define MAJOR_NUM 100
 
-/*
- * Set the message of the device driver
+/* 
+ * Set the message of the device driver 
  */
 #define IOCTL_MBOX_PROPERTY _IOWR(MAJOR_NUM, 0, char *)
 /*
- * _IOWR means that we're creating an ioctl command
+ * _IOWR means that we're creating an ioctl command 
  * number for passing information from a user process
- * to the kernel module and from the kernel module to user process
+ * to the kernel module and from the kernel module to user process 
  *
- * The first arguments, MAJOR_NUM, is the major device
+ * The first arguments, MAJOR_NUM, is the major device 
  * number we're using.
  *
- * The second argument is the number of the command
+ * The second argument is the number of the command 
  * (there could be several with different meanings).
  *
- * The third argument is the type we want to get from
+ * The third argument is the type we want to get from 
  * the process to the kernel.
  */
 
-/*
- * The name of the device file
+/* 
+ * The name of the device file 
  */
-#define DEVICE_FILE_NAME "vcio"
+#define DEVICE_FILE_NAME "char_dev"
 
 #endif

@@ -108,7 +108,7 @@ static void bcm2708_init_pinmode(void)
 #define SET_GPIO_ALT(g,a) *(gpio+(((g)/10))) |= (((a)<=3?(a)+4:(a)==4?3:2)<<(((g)%10)*3))
 
 	int pin;
-	u32 *gpio = ioremap(GPIO_BASE, SZ_16K);
+	u32 *gpio = ioremap(0x20200000, SZ_16K);
 
 	/* SPI is on GPIO 7..11 */
 	for (pin = 7; pin <= 11; pin++) {
@@ -318,7 +318,7 @@ static int bcm2708_process_transfer(struct bcm2708_spi *bs,
 		stp = spi->controller_state;
 	}
 
-	reinit_completion(&bs->done);
+	INIT_COMPLETION(bs->done);
 	bs->tx_buf = xfer->tx_buf;
 	bs->rx_buf = xfer->rx_buf;
 	bs->len = xfer->len;
@@ -512,7 +512,6 @@ static int bcm2708_spi_probe(struct platform_device *pdev)
 	master->setup = bcm2708_spi_setup;
 	master->transfer = bcm2708_spi_transfer;
 	master->cleanup = bcm2708_spi_cleanup;
-	master->dev.of_node = pdev->dev.of_node;
 	platform_set_drvdata(pdev, master);
 
 	bs = spi_master_get_devdata(master);
@@ -546,7 +545,7 @@ static int bcm2708_spi_probe(struct platform_device *pdev)
 	}
 
 	/* initialise the hardware */
-	clk_prepare_enable(clk);
+	clk_enable(clk);
 	bcm2708_wr(bs, SPI_CS, SPI_CS_REN | SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
 
 	err = spi_register_master(master);
@@ -562,7 +561,6 @@ static int bcm2708_spi_probe(struct platform_device *pdev)
 
 out_free_irq:
 	free_irq(bs->irq, master);
-	clk_disable_unprepare(bs->clk);
 out_workqueue:
 	destroy_workqueue(bs->workq);
 out_iounmap:
@@ -585,9 +583,9 @@ static int bcm2708_spi_remove(struct platform_device *pdev)
 	bcm2708_wr(bs, SPI_CS, SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
 	spin_unlock_irq(&bs->lock);
 
-	flush_work(&bs->work);
+	flush_work_sync(&bs->work);
 
-	clk_disable_unprepare(bs->clk);
+	clk_disable(bs->clk);
 	clk_put(bs->clk);
 	free_irq(bs->irq, master);
 	iounmap(bs->base);
@@ -597,17 +595,10 @@ static int bcm2708_spi_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static const struct of_device_id bcm2708_spi_match[] = {
-	{ .compatible = "brcm,bcm2708-spi", },
-	{}
-};
-MODULE_DEVICE_TABLE(of, bcm2708_spi_match);
-
 static struct platform_driver bcm2708_spi_driver = {
 	.driver		= {
 		.name	= DRV_NAME,
 		.owner	= THIS_MODULE,
-		.of_match_table = bcm2708_spi_match,
 	},
 	.probe		= bcm2708_spi_probe,
 	.remove		= bcm2708_spi_remove,

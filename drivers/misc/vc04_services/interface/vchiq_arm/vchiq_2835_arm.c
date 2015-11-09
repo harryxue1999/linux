@@ -56,7 +56,6 @@
 #include "vchiq_arm.h"
 #include "vchiq_2835.h"
 #include "vchiq_connected.h"
-#include "vchiq_killable.h"
 
 #define MAX_FRAGMENTS (VCHIQ_NUM_CURRENT_BULKS * 2)
 

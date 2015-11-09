@@ -580,7 +580,12 @@ void DWC_WRITE_REG64(uint64_t volatile *reg, uint64_t value)
 
 void DWC_MODIFY_REG32(uint32_t volatile *reg, uint32_t clear_mask, uint32_t set_mask)
 {
+	unsigned long flags;
+
+	local_irq_save(flags);
+	local_fiq_disable();
 	writel((readl(reg) & ~clear_mask) | set_mask, reg);
+	local_irq_restore(flags);
 }
 
 #if 0
@@ -760,11 +765,7 @@ dwc_timer_t *DWC_TIMER_ALLOC(char *name, dwc_timer_callback_t cb, void *data)
 		goto no_name;
 	}
 
-#if (defined(DWC_LINUX) && defined(CONFIG_DEBUG_SPINLOCK))
-	DWC_SPINLOCK_ALLOC_LINUX_DEBUG(t->lock);
-#else
 	t->lock = DWC_SPINLOCK_ALLOC();
-#endif
 	if (!t->lock) {
 		DWC_ERROR("Cannot allocate memory for lock");
 		goto no_lock;
@@ -1081,11 +1082,7 @@ dwc_workq_t *DWC_WORKQ_ALLOC(char *name)
 
 	wq->pending = 0;
 
-#if (defined(DWC_LINUX) && defined(CONFIG_DEBUG_SPINLOCK))
-	DWC_SPINLOCK_ALLOC_LINUX_DEBUG(wq->lock);
-#else
 	wq->lock = DWC_SPINLOCK_ALLOC();
-#endif
 	if (!wq->lock) {
 		goto no_lock;
 	}

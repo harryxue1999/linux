@@ -40,8 +40,6 @@
 #include "dwc_otg_core_if.h"
 #include "dwc_list.h"
 #include "dwc_otg_cil.h"
-#include "dwc_otg_fiq_fsm.h"
-
 
 /**
  * @file
@@ -246,8 +244,8 @@ typedef struct dwc_otg_qtd {
 	/** Number of DMA descriptors for this QTD */
 	uint8_t n_desc;
 
-	/**
-	 * Last activated frame(packet) index.
+	/** 
+	 * Last activated frame(packet) index. 
 	 * Used in Descriptor DMA mode only.
 	 */
 	uint16_t isoc_frame_index_last;
@@ -333,8 +331,8 @@ typedef struct dwc_otg_qh {
 
 	/** @} */
 
-	/**
-	 * Used instead of original buffer if
+	/** 
+	 * Used instead of original buffer if 
 	 * it(physical address) is not dword-aligned.
 	 */
 	uint8_t *dw_align_buf;
@@ -352,9 +350,9 @@ typedef struct dwc_otg_qh {
 	/** Descriptor List physical address. */
 	dwc_dma_t desc_list_dma;
 
-	/**
+	/** 
 	 * Xfer Bytes array.
-	 * Each element corresponds to a descriptor and indicates
+	 * Each element corresponds to a descriptor and indicates 
 	 * original XferSize size value for the descriptor.
 	 */
 	uint32_t *n_bytes;
@@ -587,12 +585,6 @@ struct dwc_otg_hcd {
 	/** Frame List DMA address */
 	dma_addr_t frame_list_dma;
 
-	struct fiq_stack *fiq_stack;
-	struct fiq_state *fiq_state;
-	
-	/** Virtual address for split transaction DMA bounce buffers */
-	struct fiq_dma_blob *fiq_dmab;
-	
 #ifdef DEBUG
 	uint32_t frrem_samples;
 	uint64_t frrem_accum;
@@ -623,9 +615,6 @@ extern void dwc_otg_hcd_queue_transactions(dwc_otg_hcd_t * hcd,
 int dwc_otg_hcd_allocate_port(dwc_otg_hcd_t * hcd, dwc_otg_qh_t *qh);
 void dwc_otg_hcd_release_port(dwc_otg_hcd_t * dwc_otg_hcd, dwc_otg_qh_t *qh);
 
-extern int fiq_fsm_queue_transaction(dwc_otg_hcd_t *hcd, dwc_otg_qh_t *qh);
-extern int fiq_fsm_transaction_suitable(dwc_otg_qh_t *qh);
-extern void dwc_otg_cleanup_fiq_channel(dwc_otg_hcd_t *hcd, uint32_t num);
 
 /** @} */
 
@@ -722,8 +711,8 @@ static inline void dwc_otg_hcd_qtd_remove(dwc_otg_hcd_t * hcd,
 	DWC_CIRCLEQ_REMOVE(&qh->qtd_list, qtd, qtd_list_entry);
 }
 
-/** Remove and free a QTD
-  * Need to disable IRQ and hold hcd lock while calling this function out of
+/** Remove and free a QTD 
+  * Need to disable IRQ and hold hcd lock while calling this function out of 
   * interrupt servicing chain */
 static inline void dwc_otg_hcd_qtd_remove_and_free(dwc_otg_hcd_t * hcd,
 						   dwc_otg_qtd_t * qtd,

@@ -135,11 +135,11 @@ static void __init update_local_mac(struct device_node *node)
 
 static int __init machine_setup(void)
 {
-	struct device_node *clock;
+	struct device_node *serial;
 	struct device_node *eth = NULL;
 
-	for_each_node_by_name(clock, "main-oscillator")
-		update_clock_frequency(clock);
+	for_each_compatible_node(serial, NULL, "ns16550a")
+		update_clock_frequency(serial);
 
 	if ((eth = of_find_compatible_node(eth, NULL, "opencores,ethoc")))
 		update_local_mac(eth);
@@ -163,12 +163,12 @@ void platform_heartbeat(void)
 
 #ifdef CONFIG_XTENSA_CALIBRATE_CCOUNT
 
-void __init platform_calibrate_ccount(void)
+void platform_calibrate_ccount(void)
 {
 	long clk_freq = 0;
 #ifdef CONFIG_OF
 	struct device_node *cpu =
-		of_find_compatible_node(NULL, NULL, "cdns,xtensa-cpu");
+		of_find_compatible_node(NULL, NULL, "xtensa,cpu");
 	if (cpu) {
 		u32 freq;
 		update_clock_frequency(cpu);
@@ -179,7 +179,8 @@ void __init platform_calibrate_ccount(void)
 	if (!clk_freq)
 		clk_freq = *(long *)XTFPGA_CLKFRQ_VADDR;
 
-	ccount_freq = clk_freq;
+	ccount_per_jiffy = clk_freq / HZ;
+	nsec_per_ccount = 1000000000UL / clk_freq;
 }
 
 #endif
@@ -194,7 +195,7 @@ void __init platform_calibrate_ccount(void)
  *  Ethernet -- OpenCores Ethernet MAC (ethoc driver)
  */
 
-static struct resource ethoc_res[] = {
+static struct resource ethoc_res[] __initdata = {
 	[0] = { /* register space */
 		.start = OETH_REGS_PADDR,
 		.end   = OETH_REGS_PADDR + OETH_REGS_SIZE - 1,
@@ -212,7 +213,7 @@ static struct resource ethoc_res[] = {
 	},
 };
 
-static struct ethoc_platform_data ethoc_pdata = {
+static struct ethoc_platform_data ethoc_pdata __initdata = {
 	/*
 	 * The MAC address for these boards is 00:50:c2:13:6f:xx.
 	 * The last byte (here as zero) is read from the DIP switches on the
@@ -222,7 +223,7 @@ static struct ethoc_platform_data ethoc_pdata = {
 	.phy_id = -1,
 };
 
-static struct platform_device ethoc_device = {
+static struct platform_device ethoc_device __initdata = {
 	.name = "ethoc",
 	.id = -1,
 	.num_resources = ARRAY_SIZE(ethoc_res),
@@ -236,13 +237,13 @@ static struct platform_device ethoc_device = {
  *  UART
  */
 
-static struct resource serial_resource = {
+static struct resource serial_resource __initdata = {
 	.start	= DUART16552_PADDR,
 	.end	= DUART16552_PADDR + 0x1f,
 	.flags	= IORESOURCE_MEM,
 };
 
-static struct plat_serial8250_port serial_platform_data[] = {
+static struct plat_serial8250_port serial_platform_data[] __initdata = {
 	[0] = {
 		.mapbase	= DUART16552_PADDR,
 		.irq		= DUART16552_INTNUM,
@@ -255,7 +256,7 @@ static struct plat_serial8250_port serial_platform_data[] = {
 	{ },
 };
 
-static struct platform_device xtavnet_uart = {
+static struct platform_device xtavnet_uart __initdata = {
 	.name		= "serial8250",
 	.id		= PLAT8250_DEV_PLATFORM,
 	.dev		= {
@@ -290,7 +291,6 @@ static int __init xtavnet_init(void)
 	 * knows whether they set it correctly on the DIP switches.
 	 */
 	pr_info("XTFPGA: Ethernet MAC %pM\n", ethoc_pdata.hwaddr);
-	ethoc_pdata.eth_clkfreq = *(long *)XTFPGA_CLKFRQ_VADDR;
 
 	return 0;
 }

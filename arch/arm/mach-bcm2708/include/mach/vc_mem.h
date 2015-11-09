@@ -33,3 +33,4 @@ extern int vc_mem_get_current_size( void );
 #endif
 
 #endif  /* VC_MEM_H */
+

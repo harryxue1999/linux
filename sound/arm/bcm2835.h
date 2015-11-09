@@ -5,7 +5,7 @@
 * agreement governing use of this software, this software is licensed to you
 * under the terms of the GNU General Public License version 2, available at
 * http://www.broadcom.com/licenses/GPLv2.php (the "GPL").
-*
+*	
 * Notwithstanding the above, under no circumstances may you combine this
 * software in any way with any other Broadcom software provided under a
 * license other than the GPL, without Broadcom's express prior written
@@ -97,7 +97,6 @@ typedef enum {
 typedef struct bcm2835_chip {
 	struct snd_card *card;
 	struct snd_pcm *pcm;
-	struct snd_pcm *pcm_spdif;
 	/* Bitmat for valid reg_base and irq numbers */
 	uint32_t avail_substreams;
 	struct platform_device *pdev[MAX_SUBSTREAMS];
@@ -107,10 +106,6 @@ typedef struct bcm2835_chip {
 	int old_volume; /* stores the volume value whist muted */
 	int dest;
 	int mute;
-
-	unsigned int opened;
-	unsigned int spdif_status;
-	struct mutex audio_mutex;
 } bcm2835_chip_t;
 
 typedef struct bcm2835_alsa_stream {
@@ -128,10 +123,6 @@ typedef struct bcm2835_alsa_stream {
 	int running;
 	int draining;
 
-	int channels;
-	int params_rate;
-	int pcm_format_width;
-
 	unsigned int pos;
 	unsigned int buffer_size;
 	unsigned int period_size;
@@ -147,7 +138,6 @@ typedef struct bcm2835_alsa_stream {
 
 int snd_bcm2835_new_ctl(bcm2835_chip_t * chip);
 int snd_bcm2835_new_pcm(bcm2835_chip_t * chip);
-int snd_bcm2835_new_spdif_pcm(bcm2835_chip_t * chip);
 
 int bcm2835_audio_open(bcm2835_alsa_stream_t * alsa_stream);
 int bcm2835_audio_close(bcm2835_alsa_stream_t * alsa_stream);

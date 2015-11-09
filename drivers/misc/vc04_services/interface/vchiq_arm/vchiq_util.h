@@ -79,3 +79,4 @@ extern VCHIQ_HEADER_T *vchiu_queue_peek(VCHIU_QUEUE_T *queue);
 extern VCHIQ_HEADER_T *vchiu_queue_pop(VCHIU_QUEUE_T *queue);
 
 #endif
+

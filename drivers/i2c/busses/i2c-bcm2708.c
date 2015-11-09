@@ -26,7 +26,6 @@
 #include <linux/spinlock.h>
 #include <linux/clk.h>
 #include <linux/err.h>
-#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
 #include <linux/slab.h>
@@ -68,7 +67,6 @@
 #define BSC_S_TA		0x00000001
 
 #define I2C_TIMEOUT_MS	150
-#define I2C_WAIT_LOOP_COUNT 40
 
 #define DRV_NAME	"bcm2708_i2c"
 
@@ -76,9 +74,6 @@ static unsigned int baudrate = CONFIG_I2C_BCM2708_BAUDRATE;
 module_param(baudrate, uint, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 MODULE_PARM_DESC(baudrate, "The I2C baudrate");
 
-static bool combined = false;
-module_param(combined, bool, 0644);
-MODULE_PARM_DESC(combined, "Use combined transactions");
 
 struct bcm2708_i2c {
 	struct i2c_adapter adapter;
@@ -87,7 +82,6 @@ struct bcm2708_i2c {
 	void __iomem *base;
 	int irq;
 	struct clk *clk;
-	u32 cdiv;
 
 	struct completion done;
 
@@ -109,12 +103,12 @@ static void bcm2708_i2c_init_pinmode(int id)
 #define SET_GPIO_ALT(g,a) *(gpio+(((g)/10))) |= (((a)<=3?(a)+4:(a)==4?3:2)<<(((g)%10)*3))
 
 	int pin;
-	u32 *gpio = ioremap(GPIO_BASE, SZ_16K);
+	u32 *gpio = ioremap(0x20200000, SZ_16K);
 
-	BUG_ON(id != 0 && id != 1);
+        BUG_ON(id != 0 && id != 1);
 	/* BSC0 is on GPIO 0 & 1, BSC1 is on GPIO 2 & 3 */
 	for (pin = id*2+0; pin <= id*2+1; pin++) {
-		printk("bcm2708_i2c_init_pinmode(%d,%d)\n", id, pin);
+printk("bcm2708_i2c_init_pinmode(%d,%d)\n", id, pin);
 		INP_GPIO(pin);		/* set mode to GPIO input first */
 		SET_GPIO_ALT(pin, 0);	/* set mode to ALT 0 */
 	}
@@ -138,7 +132,7 @@ static inline void bcm2708_wr(struct bcm2708_i2c *bi, unsigned reg, u32 val)
 static inline void bcm2708_bsc_reset(struct bcm2708_i2c *bi)
 {
 	bcm2708_wr(bi, BSC_C, 0);
-	bcm2708_wr(bi, BSC_S, BSC_S_CLKT | BSC_S_ERR | BSC_S_DONE);
+	bcm2708_wr(bi, BSC_S, BSC_S_CLKT | BSC_S_ERR | BSC_S_DONE);	
 }
 
 static inline void bcm2708_bsc_fifo_drain(struct bcm2708_i2c *bi)
@@ -153,16 +147,14 @@ static inline void bcm2708_bsc_fifo_fill(struct bcm2708_i2c *bi)
 		bcm2708_wr(bi, BSC_FIFO, bi->msg->buf[bi->pos++]);
 }
 
-static inline int bcm2708_bsc_setup(struct bcm2708_i2c *bi)
+static inline void bcm2708_bsc_setup(struct bcm2708_i2c *bi)
 {
-	u32 cdiv, s;
+	unsigned long bus_hz;
+	u32 cdiv;
 	u32 c = BSC_C_I2CEN | BSC_C_INTD | BSC_C_ST | BSC_C_CLEAR_1;
-	int wait_loops = I2C_WAIT_LOOP_COUNT;
 
-	/* Can't call clk_get_rate as it locks a mutex and here we are spinlocked.
-	 * Use the value that we cached in the probe.
-	 */
-	cdiv = bi->cdiv;
+	bus_hz = clk_get_rate(bi->clk);
+	cdiv = bus_hz / baudrate;
 
 	if (bi->msg->flags & I2C_M_RD)
 		c |= BSC_C_INTR | BSC_C_READ;
@@ -172,43 +164,7 @@ static inline int bcm2708_bsc_setup(struct bcm2708_i2c *bi)
 	bcm2708_wr(bi, BSC_DIV, cdiv);
 	bcm2708_wr(bi, BSC_A, bi->msg->addr);
 	bcm2708_wr(bi, BSC_DLEN, bi->msg->len);
-	if (combined)
-	{
-		/* Do the next two messages meet combined transaction criteria?
-		   - Current message is a write, next message is a read
-		   - Both messages to same slave address
-		   - Write message can fit inside FIFO (16 bytes or less) */
-		if ( (bi->nmsgs > 1) &&
-			!(bi->msg[0].flags & I2C_M_RD) && (bi->msg[1].flags & I2C_M_RD) &&
-			 (bi->msg[0].addr == bi->msg[1].addr) && (bi->msg[0].len <= 16)) {
-			/* Fill FIFO with entire write message (16 byte FIFO) */
-			while (bi->pos < bi->msg->len) {
-				bcm2708_wr(bi, BSC_FIFO, bi->msg->buf[bi->pos++]);
-			}
-			/* Start write transfer (no interrupts, don't clear FIFO) */
-			bcm2708_wr(bi, BSC_C, BSC_C_I2CEN | BSC_C_ST);
-
-			/* poll for transfer start bit (should only take 1-20 polls) */
-			do {
-				s = bcm2708_rd(bi, BSC_S);
-			} while (!(s & (BSC_S_TA | BSC_S_ERR | BSC_S_CLKT | BSC_S_DONE)) && --wait_loops >= 0);
-
-			/* did we time out or some error occured? */
-			if (wait_loops < 0 || (s & (BSC_S_ERR | BSC_S_CLKT))) {
-				return -1;
-			}
-
-			/* Send next read message before the write transfer finishes. */
-			bi->nmsgs--;
-			bi->msg++;
-			bi->pos = 0;
-			bcm2708_wr(bi, BSC_DLEN, bi->msg->len);
-			c = BSC_C_I2CEN | BSC_C_INTD | BSC_C_INTR | BSC_C_ST | BSC_C_READ;
-		}
-	}
 	bcm2708_wr(bi, BSC_C, c);
-
-	return 0;
 }
 
 static irqreturn_t bcm2708_i2c_interrupt(int irq, void *dev_id)
@@ -216,15 +172,13 @@ static irqreturn_t bcm2708_i2c_interrupt(int irq, void *dev_id)
 	struct bcm2708_i2c *bi = dev_id;
 	bool handled = true;
 	u32 s;
-	int ret;
 
 	spin_lock(&bi->lock);
 
 	/* we may see camera interrupts on the "other" I2C channel
-		   Just return if we've not sent anything */
-	if (!bi->nmsgs || !bi->msg) {
+           Just return if we've not sent anything */
+        if (!bi->nmsgs || !bi->msg )
 		goto early_exit;
-	}
 
 	s = bcm2708_rd(bi, BSC_S);
 
@@ -232,16 +186,13 @@ static irqreturn_t bcm2708_i2c_interrupt(int irq, void *dev_id)
 		bcm2708_bsc_reset(bi);
 		bi->error = true;
 
-		bi->msg = 0; /* to inform the that all work is done */
-		bi->nmsgs = 0;
 		/* wake up our bh */
 		complete(&bi->done);
 	} else if (s & BSC_S_DONE) {
 		bi->nmsgs--;
 
-		if (bi->msg->flags & I2C_M_RD) {
+		if (bi->msg->flags & I2C_M_RD)
 			bcm2708_bsc_fifo_drain(bi);
-		}
 
 		bcm2708_bsc_reset(bi);
 
@@ -249,19 +200,8 @@ static irqreturn_t bcm2708_i2c_interrupt(int irq, void *dev_id)
 			/* advance to next message */
 			bi->msg++;
 			bi->pos = 0;
-			ret = bcm2708_bsc_setup(bi);
-			if (ret < 0) {
-				bcm2708_bsc_reset(bi);
-				bi->error = true;
-				bi->msg = 0; /* to inform the that all work is done */
-				bi->nmsgs = 0;
-				/* wake up our bh */
-				complete(&bi->done);
-				goto early_exit;
-			}
+			bcm2708_bsc_setup(bi);
 		} else {
-			bi->msg = 0; /* to inform the that all work is done */
-			bi->nmsgs = 0;
 			/* wake up our bh */
 			complete(&bi->done);
 		}
@@ -288,39 +228,27 @@ static int bcm2708_i2c_master_xfer(struct i2c_adapter *adap,
 
 	spin_lock_irqsave(&bi->lock, flags);
 
-	reinit_completion(&bi->done);
+	INIT_COMPLETION(bi->done);
 	bi->msg = msgs;
 	bi->pos = 0;
 	bi->nmsgs = num;
 	bi->error = false;
 
-	ret = bcm2708_bsc_setup(bi);
-
 	spin_unlock_irqrestore(&bi->lock, flags);
 
-	/* check the result of the setup */
-	if (ret < 0)
-	{
-		dev_err(&adap->dev, "transfer setup timed out\n");
-		goto error_timeout;
-	}
+	bcm2708_bsc_setup(bi);
 
-	ret = wait_for_completion_timeout(&bi->done, msecs_to_jiffies(I2C_TIMEOUT_MS));
+	ret = wait_for_completion_timeout(&bi->done,
+			msecs_to_jiffies(I2C_TIMEOUT_MS));
 	if (ret == 0) {
 		dev_err(&adap->dev, "transfer timed out\n");
-		goto error_timeout;
+		spin_lock_irqsave(&bi->lock, flags);
+		bcm2708_bsc_reset(bi);
+		spin_unlock_irqrestore(&bi->lock, flags);
+		return -ETIMEDOUT;
 	}
 
-	ret = bi->error ? -EIO : num;
-	return ret;
-
-error_timeout:
-	spin_lock_irqsave(&bi->lock, flags);
-	bcm2708_bsc_reset(bi);
-	bi->msg = 0; /* to inform the interrupt handler that there's nothing else to be done */
-	bi->nmsgs = 0;
-	spin_unlock_irqrestore(&bi->lock, flags);
-	return -ETIMEDOUT;
+	return bi->error ? -EIO : num;
 }
 
 static u32 bcm2708_i2c_functionality(struct i2c_adapter *adap)
@@ -340,23 +268,6 @@ static int bcm2708_i2c_probe(struct platform_device *pdev)
 	struct clk *clk;
 	struct bcm2708_i2c *bi;
 	struct i2c_adapter *adap;
-	unsigned long bus_hz;
-	u32 cdiv;
-
-	if (pdev->dev.of_node) {
-		u32 bus_clk_rate;
-		pdev->id = of_alias_get_id(pdev->dev.of_node, "i2c");
-		if (pdev->id < 0) {
-			dev_err(&pdev->dev, "alias is missing\n");
-			return -EINVAL;
-		}
-		if (!of_property_read_u32(pdev->dev.of_node,
-					"clock-frequency", &bus_clk_rate))
-			baudrate = bus_clk_rate;
-		else
-			dev_warn(&pdev->dev,
-				"Could not read clock-frequency property\n");
-	}
 
 	regs = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!regs) {
@@ -376,17 +287,11 @@ static int bcm2708_i2c_probe(struct platform_device *pdev)
 		return PTR_ERR(clk);
 	}
 
-	err = clk_prepare_enable(clk);
-	if (err) {
-		dev_err(&pdev->dev, "could not enable clk: %d\n", err);
-		goto out_clk_put;
-	}
-
 	bcm2708_i2c_init_pinmode(pdev->id);
 
 	bi = kzalloc(sizeof(*bi), GFP_KERNEL);
 	if (!bi)
-		goto out_clk_disable;
+		goto out_clk_put;
 
 	platform_set_drvdata(pdev, bi);
 
@@ -397,7 +302,6 @@ static int bcm2708_i2c_probe(struct platform_device *pdev)
 	adap->dev.parent = &pdev->dev;
 	adap->nr = pdev->id;
 	strlcpy(adap->name, dev_name(&pdev->dev), sizeof(adap->name));
-	adap->dev.of_node = pdev->dev.of_node;
 
 	switch (pdev->id) {
 	case 0:
@@ -439,16 +343,8 @@ static int bcm2708_i2c_probe(struct platform_device *pdev)
 		goto out_free_irq;
 	}
 
-	bus_hz = clk_get_rate(bi->clk);
-	cdiv = bus_hz / baudrate;
-	if (cdiv > 0xffff) {
-		cdiv = 0xffff;
-		baudrate = bus_hz / cdiv;
-	}
-	bi->cdiv = cdiv;
-
-	dev_info(&pdev->dev, "BSC%d Controller at 0x%08lx (irq %d) (baudrate %d)\n",
-		pdev->id, (unsigned long)regs->start, irq, baudrate);
+	dev_info(&pdev->dev, "BSC%d Controller at 0x%08lx (irq %d) (baudrate %dk)\n",
+		pdev->id, (unsigned long)regs->start, irq, baudrate/1000);
 
 	return 0;
 
@@ -458,8 +354,6 @@ out_iounmap:
 	iounmap(bi->base);
 out_free_bi:
 	kfree(bi);
-out_clk_disable:
-	clk_disable_unprepare(clk);
 out_clk_put:
 	clk_put(clk);
 	return err;
@@ -474,24 +368,17 @@ static int bcm2708_i2c_remove(struct platform_device *pdev)
 	i2c_del_adapter(&bi->adapter);
 	free_irq(bi->irq, bi);
 	iounmap(bi->base);
-	clk_disable_unprepare(bi->clk);
+	clk_disable(bi->clk);
 	clk_put(bi->clk);
 	kfree(bi);
 
 	return 0;
 }
 
-static const struct of_device_id bcm2708_i2c_of_match[] = {
-        { .compatible = "brcm,bcm2708-i2c" },
-        {},
-};
-MODULE_DEVICE_TABLE(of, bcm2708_i2c_of_match);
-
 static struct platform_driver bcm2708_i2c_driver = {
 	.driver		= {
 		.name	= DRV_NAME,
 		.owner	= THIS_MODULE,
-		.of_match_table = bcm2708_i2c_of_match,
 	},
 	.probe		= bcm2708_i2c_probe,
 	.remove		= bcm2708_i2c_remove,

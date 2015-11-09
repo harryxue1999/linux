@@ -1,6 +1,5 @@
 #include <asm/assembler.h>
 
-#ifndef CONFIG_ARCH_BCM2709
 /*
  * Interrupt handling.  Preserves r7, r8, r9
  */
@@ -29,7 +28,6 @@
 #endif
 9997:
 	.endm
-#endif
 
 	.macro	arch_irq_handler, symbol_name
 	.align	5
@@ -37,5 +35,5 @@
 \symbol_name:
 	mov	r8, lr
 	arch_irq_handler_default
-	ret	r8
+	mov     pc, r8
 	.endm

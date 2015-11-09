@@ -1,5 +1,4 @@
 /**
- * Copyright (c) 2014 Raspberry Pi (Trading) Ltd. All rights reserved.
  * Copyright (c) 2010-2012 Broadcom. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -45,12 +44,11 @@
 #include <linux/bug.h>
 #include <linux/semaphore.h>
 #include <linux/list.h>
+#include <linux/proc_fs.h>
 
 #include "vchiq_core.h"
 #include "vchiq_ioctl.h"
 #include "vchiq_arm.h"
-#include "vchiq_debugfs.h"
-#include "vchiq_killable.h"
 
 #define DEVICE_NAME "vchiq"
 
@@ -106,21 +104,21 @@ static const char *const resume_state_names[] = {
 
 
 static void suspend_timer_callback(unsigned long context);
+static int vchiq_proc_add_instance(VCHIQ_INSTANCE_T instance);
+static void vchiq_proc_remove_instance(VCHIQ_INSTANCE_T instance);
 
 
 typedef struct user_service_struct {
 	VCHIQ_SERVICE_T *service;
 	void *userdata;
 	VCHIQ_INSTANCE_T instance;
-	char is_vchi;
-	char dequeue_pending;
-	char close_pending;
+	int is_vchi;
+	int dequeue_pending;
 	int message_available_pos;
 	int msg_insert;
 	int msg_remove;
 	struct semaphore insert_event;
 	struct semaphore remove_event;
-	struct semaphore close_event;
 	VCHIQ_HEADER_T * msg_queue[MSG_QUEUE_SIZE];
 } USER_SERVICE_T;
 
@@ -143,13 +141,11 @@ struct vchiq_instance_struct {
 	int closing;
 	int pid;
 	int mark;
-	int use_close_delivered;
-	int trace;
 
 	struct list_head bulk_waiter_list;
 	struct mutex bulk_waiter_list_mutex;
 
-	VCHIQ_DEBUGFS_NODE_T debugfs_node;
+	struct proc_dir_entry *proc_entry;
 };
 
 typedef struct dump_context_struct {
@@ -182,9 +178,7 @@ static const char *const ioctl_names[] = {
 	"USE_SERVICE",
 	"RELEASE_SERVICE",
 	"SET_SERVICE_OPTION",
-	"DUMP_PHYS_MEM",
-	"LIB_VERSION",
-	"CLOSE_DELIVERED"
+	"DUMP_PHYS_MEM"
 };
 
 vchiq_static_assert((sizeof(ioctl_names)/sizeof(ioctl_names[0])) ==
@@ -236,13 +230,10 @@ add_completion(VCHIQ_INSTANCE_T instance, VCHIQ_REASON_T reason,
 	completion->service_userdata = user_service->service;
 	completion->bulk_userdata = bulk_userdata;
 
-	if (reason == VCHIQ_SERVICE_CLOSED) {
+	if (reason == VCHIQ_SERVICE_CLOSED)
 		/* Take an extra reference, to be held until
 		   this CLOSED notification is delivered. */
 		lock_service(user_service->service);
-		if (instance->use_close_delivered)
-			user_service->close_pending = 1;
-	}
 
 	/* A write barrier is needed here to ensure that the entire completion
 		record is written out before the insert point. */
@@ -289,10 +280,10 @@ service_callback(VCHIQ_REASON_T reason, VCHIQ_HEADER_T *header,
 		return VCHIQ_SUCCESS;
 
 	vchiq_log_trace(vchiq_arm_log_level,
-		"service_callback - service %lx(%d,%p), reason %d, header %lx, "
+		"service_callback - service %lx(%d), reason %d, header %lx, "
 		"instance %lx, bulk_userdata %lx",
 		(unsigned long)user_service,
-		service->localport, user_service->userdata,
+		service->localport,
 		reason, (unsigned long)header,
 		(unsigned long)instance, (unsigned long)bulk_userdata);
 
@@ -379,31 +370,10 @@ user_service_free(void *userdata)
 
 /****************************************************************************
 *
-*   close_delivered
-*
-***************************************************************************/
-static void close_delivered(USER_SERVICE_T *user_service)
-{
-	vchiq_log_info(vchiq_arm_log_level,
-		"close_delivered(handle=%x)",
-		user_service->service->handle);
-
-	if (user_service->close_pending) {
-		/* Allow the underlying service to be culled */
-		unlock_service(user_service->service);
-
-		/* Wake the user-thread blocked in close_ or remove_service */
-		up(&user_service->close_event);
-
-		user_service->close_pending = 0;
-	}
-}
-
-/****************************************************************************
-*
 *   vchiq_ioctl
 *
 ***************************************************************************/
+
 static long
 vchiq_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
@@ -514,16 +484,14 @@ vchiq_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			user_service->service = service;
 			user_service->userdata = userdata;
 			user_service->instance = instance;
-			user_service->is_vchi = (args.is_vchi != 0);
+			user_service->is_vchi = args.is_vchi;
 			user_service->dequeue_pending = 0;
-			user_service->close_pending = 0;
 			user_service->message_available_pos =
 				instance->completion_remove - 1;
 			user_service->msg_insert = 0;
 			user_service->msg_remove = 0;
 			sema_init(&user_service->insert_event, 0);
 			sema_init(&user_service->remove_event, 0);
-			sema_init(&user_service->close_event, 0);
 
 			if (args.is_open) {
 				status = vchiq_open_service_internal
@@ -557,24 +525,8 @@ vchiq_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		VCHIQ_SERVICE_HANDLE_T handle = (VCHIQ_SERVICE_HANDLE_T)arg;
 
 		service = find_service_for_instance(instance, handle);
-		if (service != NULL) {
-			USER_SERVICE_T *user_service =
-				(USER_SERVICE_T *)service->base.userdata;
-			/* close_pending is false on first entry, and when the
-                           wait in vchiq_close_service has been interrupted. */
-			if (!user_service->close_pending) {
-				status = vchiq_close_service(service->handle);
-				if (status != VCHIQ_SUCCESS)
-					break;
-			}
-
-			/* close_pending is true once the underlying service
-			   has been closed until the client library calls the
-			   CLOSE_DELIVERED ioctl, signalling close_event. */
-			if (user_service->close_pending &&
-				down_interruptible(&user_service->close_event))
-				status = VCHIQ_RETRY;
-		}
+		if (service != NULL)
+			status = vchiq_close_service(service->handle);
 		else
 			ret = -EINVAL;
 	} break;
@@ -583,24 +535,8 @@ vchiq_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		VCHIQ_SERVICE_HANDLE_T handle = (VCHIQ_SERVICE_HANDLE_T)arg;
 
 		service = find_service_for_instance(instance, handle);
-		if (service != NULL) {
-			USER_SERVICE_T *user_service =
-				(USER_SERVICE_T *)service->base.userdata;
-			/* close_pending is false on first entry, and when the
-                           wait in vchiq_close_service has been interrupted. */
-			if (!user_service->close_pending) {
-				status = vchiq_remove_service(service->handle);
-				if (status != VCHIQ_SUCCESS)
-					break;
-			}
-
-			/* close_pending is true once the underlying service
-			   has been closed until the client library calls the
-			   CLOSE_DELIVERED ioctl, signalling close_event. */
-			if (user_service->close_pending &&
-				down_interruptible(&user_service->close_event))
-				status = VCHIQ_RETRY;
-		}
+		if (service != NULL)
+			status = vchiq_remove_service(service->handle);
 		else
 			ret = -EINVAL;
 	} break;
@@ -867,9 +803,8 @@ vchiq_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 					completion->header = msgbuf;
 				}
 
-				if ((completion->reason ==
-					VCHIQ_SERVICE_CLOSED) &&
-					!instance->use_close_delivered)
+				if (completion->reason ==
+					VCHIQ_SERVICE_CLOSED)
 					unlock_service(service);
 
 				if (copy_to_user((void __user *)(
@@ -1047,28 +982,6 @@ vchiq_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		dump_phys_mem(args.virt_addr, args.num_bytes);
 	} break;
 
-	case VCHIQ_IOC_LIB_VERSION: {
-		unsigned int lib_version = (unsigned int)arg;
-
-		if (lib_version < VCHIQ_VERSION_MIN)
-			ret = -EINVAL;
-		else if (lib_version >= VCHIQ_VERSION_CLOSE_DELIVERED)
-			instance->use_close_delivered = 1;
-	} break;
-
-	case VCHIQ_IOC_CLOSE_DELIVERED: {
-		VCHIQ_SERVICE_HANDLE_T handle = (VCHIQ_SERVICE_HANDLE_T)arg;
-
-		service = find_closed_service_for_instance(instance, handle);
-		if (service != NULL) {
-			USER_SERVICE_T *user_service =
-				(USER_SERVICE_T *)service->base.userdata;
-			close_delivered(user_service);
-		}
-		else
-			ret = -EINVAL;
-	} break;
-
 	default:
 		ret = -ENOTTY;
 		break;
@@ -1135,7 +1048,7 @@ vchiq_open(struct inode *inode, struct file *file)
 		instance->state = state;
 		instance->pid = current->tgid;
 
-		ret = vchiq_debugfs_add_instance(instance);
+		ret = vchiq_proc_add_instance(instance);
 		if (ret != 0) {
 			kfree(instance);
 			return ret;
@@ -1256,15 +1169,7 @@ vchiq_release(struct inode *inode, struct file *file)
 				(MAX_COMPLETIONS - 1)];
 			service = completion->service_userdata;
 			if (completion->reason == VCHIQ_SERVICE_CLOSED)
-			{
-				USER_SERVICE_T *user_service =
-					service->base.userdata;
-
-				/* Wake any blocked user-thread */
-				if (instance->use_close_delivered)
-					up(&user_service->close_event);
 				unlock_service(service);
-			}
 			instance->completion_remove++;
 		}
 
@@ -1288,7 +1193,7 @@ vchiq_release(struct inode *inode, struct file *file)
 			}
 		}
 
-		vchiq_debugfs_remove_instance(instance);
+		vchiq_proc_remove_instance(instance);
 
 		kfree(instance);
 		file->private_data = NULL;
@@ -1797,7 +1702,7 @@ set_suspend_state(VCHIQ_ARM_STATE_T *arm_state,
 		complete_all(&arm_state->vc_resume_complete);
 		break;
 	case VC_SUSPEND_IDLE:
-		reinit_completion(&arm_state->vc_suspend_complete);
+		INIT_COMPLETION(arm_state->vc_suspend_complete);
 		break;
 	case VC_SUSPEND_REQUESTED:
 		break;
@@ -1825,7 +1730,7 @@ set_resume_state(VCHIQ_ARM_STATE_T *arm_state,
 	case VC_RESUME_FAILED:
 		break;
 	case VC_RESUME_IDLE:
-		reinit_completion(&arm_state->vc_resume_complete);
+		INIT_COMPLETION(arm_state->vc_resume_complete);
 		break;
 	case VC_RESUME_REQUESTED:
 		break;
@@ -1887,7 +1792,7 @@ block_resume(VCHIQ_ARM_STATE_T *arm_state)
 	 * (which only happens when blocked_count hits 0) then those threads
 	 * will have to wait until next time around */
 	if (arm_state->blocked_count) {
-		reinit_completion(&arm_state->blocked_blocker);
+		INIT_COMPLETION(arm_state->blocked_blocker);
 		write_unlock_bh(&arm_state->susp_res_lock);
 		vchiq_log_info(vchiq_susp_log_level, "%s wait for previously "
 			"blocked clients", __func__);
@@ -1932,7 +1837,7 @@ block_resume(VCHIQ_ARM_STATE_T *arm_state)
 		write_lock_bh(&arm_state->susp_res_lock);
 		resume_count++;
 	}
-	reinit_completion(&arm_state->resume_blocker);
+	INIT_COMPLETION(arm_state->resume_blocker);
 	arm_state->resume_blocked = 1;
 
 out:
@@ -2542,52 +2447,6 @@ vchiq_release_service_internal(VCHIQ_SERVICE_T *service)
 	return vchiq_release_internal(service->state, service);
 }
 
-VCHIQ_DEBUGFS_NODE_T *
-vchiq_instance_get_debugfs_node(VCHIQ_INSTANCE_T instance)
-{
-	return &instance->debugfs_node;
-}
-
-int
-vchiq_instance_get_use_count(VCHIQ_INSTANCE_T instance)
-{
-	VCHIQ_SERVICE_T *service;
-	int use_count = 0, i;
-	i = 0;
-	while ((service = next_service_by_instance(instance->state,
-		instance, &i)) != NULL) {
-		use_count += service->service_use_count;
-		unlock_service(service);
-	}
-	return use_count;
-}
-
-int
-vchiq_instance_get_pid(VCHIQ_INSTANCE_T instance)
-{
-	return instance->pid;
-}
-
-int
-vchiq_instance_get_trace(VCHIQ_INSTANCE_T instance)
-{
-	return instance->trace;
-}
-
-void
-vchiq_instance_set_trace(VCHIQ_INSTANCE_T instance, int trace)
-{
-	VCHIQ_SERVICE_T *service;
-	int i;
-	i = 0;
-	while ((service = next_service_by_instance(instance->state,
-		instance, &i)) != NULL) {
-		service->trace = trace;
-		unlock_service(service);
-	}
-	instance->trace = (trace != 0);
-}
-
 static void suspend_timer_callback(unsigned long context)
 {
 	VCHIQ_STATE_T *state = (VCHIQ_STATE_T *)context;
@@ -2803,10 +2662,10 @@ vchiq_init(void)
 	int err;
 	void *ptr_err;
 
-	/* create debugfs entries */
-	err = vchiq_debugfs_init();
+	/* create proc entries */
+	err = vchiq_proc_init();
 	if (err != 0)
-		goto failed_debugfs_init;
+		goto failed_proc_init;
 
 	err = alloc_chrdev_region(&vchiq_devid, VCHIQ_MINOR, 1, DEVICE_NAME);
 	if (err != 0) {
@@ -2856,10 +2715,80 @@ failed_class_create:
 failed_cdev_add:
 	unregister_chrdev_region(vchiq_devid, 1);
 failed_alloc_chrdev:
-	vchiq_debugfs_deinit();
-failed_debugfs_init:
+	vchiq_proc_deinit();
+failed_proc_init:
 	vchiq_log_warning(vchiq_arm_log_level, "could not load vchiq");
 	return err;
+}
+
+static int vchiq_instance_get_use_count(VCHIQ_INSTANCE_T instance)
+{
+	VCHIQ_SERVICE_T *service;
+	int use_count = 0, i;
+	i = 0;
+	while ((service = next_service_by_instance(instance->state,
+		instance, &i)) != NULL) {
+		use_count += service->service_use_count;
+		unlock_service(service);
+	}
+	return use_count;
+}
+
+/* read the per-process use-count */
+static int proc_read_use_count(char *page, char **start,
+			       off_t off, int count,
+			       int *eof, void *data)
+{
+	VCHIQ_INSTANCE_T instance = data;
+	int len, use_count;
+
+	use_count = vchiq_instance_get_use_count(instance);
+	len = snprintf(page+off, count, "%d\n", use_count);
+
+	return len;
+}
+
+/* add an instance (process) to the proc entries */
+static int vchiq_proc_add_instance(VCHIQ_INSTANCE_T instance)
+{
+#if 1
+	return 0;
+#else
+	char pidstr[32];
+	struct proc_dir_entry *top, *use_count;
+	struct proc_dir_entry *clients = vchiq_clients_top();
+	int pid = instance->pid;
+
+	snprintf(pidstr, sizeof(pidstr), "%d", pid);
+	top = proc_mkdir(pidstr, clients);
+	if (!top)
+		goto fail_top;
+
+	use_count = create_proc_read_entry("use_count",
+					   0444, top,
+					   proc_read_use_count,
+					   instance);
+	if (!use_count)
+		goto fail_use_count;
+
+	instance->proc_entry = top;
+
+	return 0;
+
+fail_use_count:
+	remove_proc_entry(top->name, clients);
+fail_top:
+	return -ENOMEM;
+#endif
+}
+
+static void vchiq_proc_remove_instance(VCHIQ_INSTANCE_T instance)
+{
+#if 0
+	struct proc_dir_entry *clients = vchiq_clients_top();
+	remove_proc_entry("use_count", instance->proc_entry);
+	remove_proc_entry(instance->proc_entry->name, clients);
+#endif
 }
 
 /****************************************************************************

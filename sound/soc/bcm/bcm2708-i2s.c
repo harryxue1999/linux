@@ -31,8 +31,6 @@
  * General Public License for more details.
  */
 
-#include "bcm2708-i2s.h"
-
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/device.h>
@@ -40,7 +38,6 @@
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/clk.h>
-#include <mach/gpio.h>
 
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -48,8 +45,6 @@
 #include <sound/initval.h>
 #include <sound/soc.h>
 #include <sound/dmaengine_pcm.h>
-
-#include <asm/system_info.h>
 
 /* Clock registers */
 #define BCM2708_CLK_PCMCTL_REG  0x00
@@ -168,9 +163,6 @@ static const unsigned int bcm2708_clk_freq[BCM2708_CLK_SRC_HDMI+1] = {
 #define BCM2708_DMA_DREQ_PCM_TX		2
 #define BCM2708_DMA_DREQ_PCM_RX		3
 
-/* I2S pin configuration */
-static int bcm2708_i2s_gpio=BCM2708_I2S_GPIO_AUTO;
-
 /* General device struct */
 struct bcm2708_i2s_dev {
 	struct device				*dev;
@@ -181,12 +173,6 @@ struct bcm2708_i2s_dev {
 	struct regmap *i2s_regmap;
 	struct regmap *clk_regmap;
 };
-
-void bcm2708_i2s_set_gpio(int gpio) {
-	bcm2708_i2s_gpio=gpio;
-}
-EXPORT_SYMBOL(bcm2708_i2s_set_gpio);
-
 
 static void bcm2708_i2s_start_clock(struct bcm2708_i2s_dev *dev)
 {
@@ -319,67 +305,6 @@ static int bcm2708_i2s_set_dai_bclk_ratio(struct snd_soc_dai *dai,
 	return 0;
 }
 
-
-static int bcm2708_i2s_set_function(unsigned offset, int function)
-{
-	#define GPIOFSEL(x)  (0x00+(x)*4)
-	void __iomem *gpio = __io_address(GPIO_BASE);
-	unsigned alt = function <= 3 ? function + 4: function == 4 ? 3 : 2;
-	unsigned gpiodir;
-	unsigned gpio_bank = offset / 10;
-	unsigned gpio_field_offset = (offset - 10 * gpio_bank) * 3;
-
-	if (offset >= BCM2708_NR_GPIOS)
-		return -EINVAL;
-
-	gpiodir = readl(gpio + GPIOFSEL(gpio_bank));
-	gpiodir &= ~(7 << gpio_field_offset);
-	gpiodir |= alt << gpio_field_offset;
-	writel(gpiodir, gpio + GPIOFSEL(gpio_bank));
-	return 0;
-}
-
-static void bcm2708_i2s_setup_gpio(void)
-{
-	/*
-	 * This is the common way to handle the GPIO pins for
-	 * the Raspberry Pi.
-	 * TODO Better way would be to handle
-	 * this in the device tree!
-	 */
-	int pin,pinconfig,startpin,alt;
-
-	/* SPI is on different GPIOs on different boards */
-        /* for Raspberry Pi B+, this is pin GPIO18-21, for original on 28-31 */
-	if (bcm2708_i2s_gpio==BCM2708_I2S_GPIO_AUTO) {	
-		if ((system_rev & 0xffffff) >= 0x10) {
-			/* Model B+ */
-			pinconfig=BCM2708_I2S_GPIO_PIN18;
-		} else {
-			/* original */
-			pinconfig=BCM2708_I2S_GPIO_PIN28;
-		}
-	} else {
-		pinconfig=bcm2708_i2s_gpio;
-	}
-
-	if (pinconfig==BCM2708_I2S_GPIO_PIN18) {
-		startpin=18;
-		alt=BCM2708_I2S_GPIO_PIN18_ALT;
-	} else if (pinconfig==BCM2708_I2S_GPIO_PIN28) {
-		startpin=28;
-		alt=BCM2708_I2S_GPIO_PIN28_ALT;
-	} else {
-		printk(KERN_INFO "Can't configure I2S GPIOs, unknown pin mode for I2S: %i\n",pinconfig);
-		return;
-	}	
-
-	/* configure I2S pins to correct ALT mode */
-	for (pin = startpin; pin <= startpin+3; pin++) {
-		bcm2708_i2s_set_function(pin, alt);
-	}
-}
-
 static int bcm2708_i2s_hw_params(struct snd_pcm_substream *substream,
 				 struct snd_pcm_hw_params *params,
 				 struct snd_soc_dai *dai)
@@ -409,9 +334,6 @@ static int bcm2708_i2s_hw_params(struct snd_pcm_substream *substream,
 	if (csreg & (BCM2708_I2S_TXON | BCM2708_I2S_RXON))
 		return 0;
 
-
-	bcm2708_i2s_setup_gpio();
-
 	/*
 	 * Adjust the data length according to the format.
 	 * We prefill the half frame length with an integer
@@ -422,15 +344,15 @@ static int bcm2708_i2s_hw_params(struct snd_pcm_substream *substream,
 	switch (params_format(params)) {
 	case SNDRV_PCM_FORMAT_S16_LE:
 		data_length = 16;
-		bclk_ratio = 50;
+		bclk_ratio = 40;
 		break;
 	case SNDRV_PCM_FORMAT_S24_LE:
 		data_length = 24;
-		bclk_ratio = 50;
+		bclk_ratio = 40;
 		break;
 	case SNDRV_PCM_FORMAT_S32_LE:
 		data_length = 32;
-		bclk_ratio = 100;
+		bclk_ratio = 80;
 		break;
 	default:
 		return -EINVAL;
@@ -493,19 +415,15 @@ static int bcm2708_i2s_hw_params(struct snd_pcm_substream *substream,
 		divf = dividend & BCM2708_CLK_DIVF_MASK;
 	}
 
-	/* Clock should only be set up here if CPU is clock master */
-	if (((dev->fmt & SND_SOC_DAIFMT_MASTER_MASK) == SND_SOC_DAIFMT_CBS_CFS) ||
-	    ((dev->fmt & SND_SOC_DAIFMT_MASTER_MASK) == SND_SOC_DAIFMT_CBS_CFM)) {
-		/* Set clock divider */
-		regmap_write(dev->clk_regmap, BCM2708_CLK_PCMDIV_REG, BCM2708_CLK_PASSWD
-				| BCM2708_CLK_DIVI(divi)
-				| BCM2708_CLK_DIVF(divf));
+	/* Set clock divider */
+	regmap_write(dev->clk_regmap, BCM2708_CLK_PCMDIV_REG, BCM2708_CLK_PASSWD
+			| BCM2708_CLK_DIVI(divi)
+			| BCM2708_CLK_DIVF(divf));
 
-		/* Setup clock, but don't start it yet */
-		regmap_write(dev->clk_regmap, BCM2708_CLK_PCMCTL_REG, BCM2708_CLK_PASSWD
-				| BCM2708_CLK_MASH(mash)
-				| BCM2708_CLK_SRC(clk_src));
-	}
+	/* Setup clock, but don't start it yet */
+	regmap_write(dev->clk_regmap, BCM2708_CLK_PCMCTL_REG, BCM2708_CLK_PASSWD
+			| BCM2708_CLK_MASH(mash)
+			| BCM2708_CLK_SRC(clk_src));
 
 	/* Setup the frame format */
 	format = BCM2708_I2S_CHEN;
@@ -857,7 +775,6 @@ static const struct regmap_config bcm2708_regmap_config[] = {
 		.precious_reg = bcm2708_i2s_precious_reg,
 		.volatile_reg = bcm2708_i2s_volatile_reg,
 		.cache_type = REGCACHE_RBTREE,
-		.name = "i2s",
 	},
 	{
 		.reg_bits = 32,
@@ -866,13 +783,37 @@ static const struct regmap_config bcm2708_regmap_config[] = {
 		.max_register = BCM2708_CLK_PCMDIV_REG,
 		.volatile_reg = bcm2708_clk_volatile_reg,
 		.cache_type = REGCACHE_RBTREE,
-		.name = "clk",
 	},
 };
 
 static const struct snd_soc_component_driver bcm2708_i2s_component = {
 	.name		= "bcm2708-i2s-comp",
 };
+
+
+static void bcm2708_i2s_setup_gpio(void)
+{
+	/*
+	 * This is the common way to handle the GPIO pins for
+	 * the Raspberry Pi.
+	 * TODO Better way would be to handle
+	 * this in the device tree!
+	 */
+#define INP_GPIO(g) *(gpio+((g)/10)) &= ~(7<<(((g)%10)*3))
+#define SET_GPIO_ALT(g,a) *(gpio+(((g)/10))) |= (((a)<=3?(a)+4:(a)==4?3:2)<<(((g)%10)*3))
+
+	unsigned int *gpio;
+	int pin;
+	gpio = ioremap(GPIO_BASE, SZ_16K);
+
+	/* SPI is on GPIO 7..11 */
+	for (pin = 28; pin <= 31; pin++) {
+		INP_GPIO(pin);		/* set mode to GPIO input first */
+		SET_GPIO_ALT(pin, 2);	/* set mode to ALT 0 */
+	}
+#undef INP_GPIO
+#undef SET_GPIO_ALT
+}
 
 static const struct snd_pcm_hardware bcm2708_pcm_hardware = {
 	.info			= SNDRV_PCM_INFO_INTERLEAVED |
@@ -923,6 +864,8 @@ static int bcm2708_i2s_probe(struct platform_device *pdev)
 			   GFP_KERNEL);
 	if (IS_ERR(dev))
 		return PTR_ERR(dev);
+
+	bcm2708_i2s_setup_gpio();
 
 	dev->i2s_regmap = regmap[0];
 	dev->clk_regmap = regmap[1];
@@ -985,19 +928,12 @@ static int bcm2708_i2s_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static const struct of_device_id bcm2708_i2s_of_match[] = {
-	{ .compatible = "brcm,bcm2708-i2s", },
-	{},
-};
-MODULE_DEVICE_TABLE(of, bcm2708_i2s_of_match);
-
 static struct platform_driver bcm2708_i2s_driver = {
 	.probe		= bcm2708_i2s_probe,
 	.remove		= bcm2708_i2s_remove,
 	.driver		= {
 		.name	= "bcm2708-i2s",
 		.owner	= THIS_MODULE,
-		.of_match_table = bcm2708_i2s_of_match,
 	},
 };
 

@@ -27,26 +27,21 @@
 #include <linux/interrupt.h>
 #include <linux/amba/bus.h>
 #include <linux/amba/clcd.h>
-#include <linux/clk-provider.h>
-#include <linux/clkdev.h>
 #include <linux/clockchips.h>
 #include <linux/cnt32_to_63.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/of_platform.h>
 #include <linux/spi/spi.h>
-#include <linux/gpio/machine.h>
 #include <linux/w1-gpio.h>
-#include <linux/pps-gpio.h>
 
 #include <linux/version.h>
 #include <linux/clkdev.h>
-#include <asm/system_info.h>
+#include <asm/system.h>
 #include <mach/hardware.h>
 #include <asm/irq.h>
 #include <linux/leds.h>
 #include <asm/mach-types.h>
-#include <linux/sched_clock.h>
+#include <asm/sched_clock.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/flash.h>
@@ -63,6 +58,7 @@
 
 #include "bcm2708.h"
 #include "armctrl.h"
+#include "clock.h"
 
 #ifdef CONFIG_BCM_VC_CMA
 #include <linux/broadcom/vc_cma.h>
@@ -83,21 +79,12 @@
 
 // use GPIO 4 for the one-wire GPIO pin, if enabled
 #define W1_GPIO 4
-// ensure one-wire GPIO pullup is disabled by default
-#define W1_PULLUP -1
 
 /* command line parameters */
 static unsigned boardrev, serial;
-static unsigned uart_clock = UART0_CLOCK;
-static unsigned disk_led_gpio = 16;
-static unsigned disk_led_active_low = 1;
+static unsigned uart_clock;
 static unsigned reboot_part = 0;
 static unsigned w1_gpio_pin = W1_GPIO;
-static unsigned w1_gpio_pullup = W1_PULLUP;
-static int pps_gpio_pin = -1;
-static bool vc_i2c_override = false;
-
-static unsigned use_dt = 0;
 
 static void __init bcm2708_init_led(void);
 
@@ -173,7 +160,7 @@ static unsigned long bcm2708_read_current_timer(void)
 	return timer_read();
 }
 
-static u64 notrace bcm2708_read_sched_clock(void)
+static u32 notrace bcm2708_read_sched_clock(void)
 {
 	return timer_read();
 }
@@ -204,39 +191,51 @@ static void __init bcm2708_clocksource_init(void)
 	}
 }
 
-struct clk __init *bcm2708_clk_register(const char *name, unsigned long fixed_rate)
-{
-	struct clk *clk;
 
-	clk = clk_register_fixed_rate(NULL, name, NULL, CLK_IS_ROOT,
-						fixed_rate);
-	if (IS_ERR(clk))
-		pr_err("%s not registered\n", name);
+/*
+ * These are fixed clocks.
+ */
+static struct clk ref24_clk = {
+	.rate = UART0_CLOCK,	/* The UART is clocked at 3MHz via APB_CLK */
+};
 
-	return clk;
-}
+static struct clk osc_clk = {
+#ifdef CONFIG_ARCH_BCM2708_CHIPIT
+	.rate = 27000000,
+#else
+	.rate = 500000000,	/* ARM clock is set from the VideoCore booter */
+#endif
+};
 
-void __init bcm2708_register_clkdev(struct clk *clk, const char *name)
-{
-	int ret;
+/* warning - the USB needs a clock > 34MHz */
 
-	ret = clk_register_clkdev(clk, NULL, name);
-	if (ret)
-		pr_err("%s alias not registered\n", name);
-}
+static struct clk sdhost_clk = {
+#ifdef CONFIG_ARCH_BCM2708_CHIPIT
+	.rate = 4000000,	/* 4MHz */
+#else
+	.rate = 250000000,	/* 250MHz */
+#endif
+};
 
-void __init bcm2708_init_clocks(void)
-{
-	struct clk *clk;
-
-	clk = bcm2708_clk_register("uart0_clk", uart_clock);
-	bcm2708_register_clkdev(clk, "dev:f1");
-
-	clk = bcm2708_clk_register("sdhost_clk", 250000000);
-	bcm2708_register_clkdev(clk, "bcm2708_spi.0");
-	bcm2708_register_clkdev(clk, "bcm2708_i2c.0");
-	bcm2708_register_clkdev(clk, "bcm2708_i2c.1");
-}
+static struct clk_lookup lookups[] = {
+	{			/* UART0 */
+	 .dev_id = "dev:f1",
+	 .clk = &ref24_clk,
+	 },
+	{			/* USB */
+	 .dev_id = "bcm2708_usb",
+	 .clk = &osc_clk,
+	 }, {	/* SPI */
+		 .dev_id = "bcm2708_spi.0",
+		 .clk = &sdhost_clk,
+	 }, {	/* BSC0 */
+		 .dev_id = "bcm2708_i2c.0",
+		 .clk = &sdhost_clk,
+	 }, {	/* BSC1 */
+		 .dev_id = "bcm2708_i2c.1",
+		 .clk = &sdhost_clk,
+	 }
+};
 
 #define UART0_IRQ	{ IRQ_UART, 0 /*NO_IRQ*/ }
 #define UART0_DMA	{ 15, 14 }
@@ -265,7 +264,6 @@ static struct platform_device bcm2708_dmaman_device = {
 #if defined(CONFIG_W1_MASTER_GPIO) || defined(CONFIG_W1_MASTER_GPIO_MODULE)
 static struct w1_gpio_platform_data w1_gpio_pdata = {
 	.pin = W1_GPIO,
-        .ext_pullup_enable_pin = W1_PULLUP,
 	.is_open_drain = 0,
 };
 
@@ -275,19 +273,6 @@ static struct platform_device w1_device = {
 	.dev.platform_data = &w1_gpio_pdata,
 };
 #endif
-
-static struct pps_gpio_platform_data pps_gpio_info = {
-	.assert_falling_edge = false,
-	.capture_clear = false,
-	.gpio_pin = -1,
-	.gpio_label = "PPS",
-};
-
-static struct platform_device pps_gpio_device = {
-	.name = "pps-gpio",
-	.id = PLATFORM_DEVID_NONE,
-	.dev.platform_data = &pps_gpio_info,
-};
 
 static u64 fb_dmamask = DMA_BIT_MASK(DMA_MASK_BITS_COMMON);
 
@@ -339,13 +324,22 @@ static struct resource bcm2708_usb_resources[] = {
 	       .end = IRQ_HOSTPORT,
 	       .flags = IORESOURCE_IRQ,
 	       },
-	[3] = {
-			.start = IRQ_USB,
-			.end = IRQ_USB,
-			.flags = IORESOURCE_IRQ,
-			},
 };
 
+bool fiq_fix_enable = true;
+
+static struct resource bcm2708_usb_resources_no_fiq_fix[] = {
+	[0] = {
+		.start = USB_BASE,
+		.end = USB_BASE + SZ_128K - 1,
+		.flags = IORESOURCE_MEM,
+		},
+	[1] = {
+		.start = IRQ_USB,
+		.end = IRQ_USB,
+		.flags = IORESOURCE_IRQ,
+		},
+};
 
 static u64 usb_dmamask = DMA_BIT_MASK(DMA_MASK_BITS_COMMON);
 
@@ -433,8 +427,8 @@ static struct platform_device bcm2708_systemtimer_device = {
 		},
 };
 
-#ifdef CONFIG_MMC_BCM2835	/* Arasan emmc SD (new) */
-static struct resource bcm2835_emmc_resources[] = {
+#ifdef CONFIG_MMC_SDHCI_BCM2708	/* Arasan emmc SD */
+static struct resource bcm2708_emmc_resources[] = {
 	[0] = {
 	       .start = EMMC_BASE,
 	       .end = EMMC_BASE + SZ_256 - 1,	/* we only need this area */
@@ -448,18 +442,18 @@ static struct resource bcm2835_emmc_resources[] = {
 	       },
 };
 
-static u64 bcm2835_emmc_dmamask = 0xffffffffUL;
+static u64 bcm2708_emmc_dmamask = 0xffffffffUL;
 
-struct platform_device bcm2835_emmc_device = {
-	.name = "mmc-bcm2835",
+struct platform_device bcm2708_emmc_device = {
+	.name = "bcm2708_sdhci",
 	.id = 0,
-	.num_resources = ARRAY_SIZE(bcm2835_emmc_resources),
-	.resource = bcm2835_emmc_resources,
+	.num_resources = ARRAY_SIZE(bcm2708_emmc_resources),
+	.resource = bcm2708_emmc_resources,
 	.dev = {
-		.dma_mask = &bcm2835_emmc_dmamask,
+		.dma_mask = &bcm2708_emmc_dmamask,
 		.coherent_dma_mask = 0xffffffffUL},
 };
-#endif /* CONFIG_MMC_BCM2835 */
+#endif /* CONFIG_MMC_SDHCI_BCM2708 */
 
 static struct resource bcm2708_powerman_resources[] = {
 	[0] = {
@@ -624,7 +618,7 @@ static struct platform_device bcm2835_thermal_device = {
 	.name = "bcm2835_thermal",
 };
 
-#if defined(CONFIG_SND_BCM2708_SOC_I2S) || defined(CONFIG_SND_BCM2708_SOC_I2S_MODULE)
+#ifdef CONFIG_SND_BCM2708_SOC_I2S_MODULE
 static struct resource bcm2708_i2s_resources[] = {
 	{
 		.start = I2S_BASE,
@@ -660,49 +654,6 @@ static struct platform_device snd_pcm5102a_codec_device = {
 };
 #endif
 
-#if defined(CONFIG_SND_BCM2708_SOC_HIFIBERRY_DACPLUS) || defined(CONFIG_SND_BCM2708_SOC_HIFIBERRY_DACPLUS_MODULE)
-static struct platform_device snd_rpi_hifiberry_dacplus_device = {
-        .name = "snd-rpi-hifiberry-dacplus",
-        .id = 0,
-        .num_resources = 0,
-};
-
-static struct i2c_board_info __initdata snd_pcm512x_hbdacplus_i2c_devices[] = {
-        {
-                I2C_BOARD_INFO("pcm5122", 0x4d)
-        },
-};
-#endif
-
-#if defined(CONFIG_SND_BCM2708_SOC_HIFIBERRY_DIGI) || defined(CONFIG_SND_BCM2708_SOC_HIFIBERRY_DIGI_MODULE)
-static struct platform_device snd_hifiberry_digi_device = {
-        .name = "snd-hifiberry-digi",
-        .id = 0,
-        .num_resources = 0,
-};
-
-static struct i2c_board_info __initdata snd_wm8804_i2c_devices[] = {
-        {
-                I2C_BOARD_INFO("wm8804", 0x3b)
-        },
-};
-
-#endif
-
-#if defined(CONFIG_SND_BCM2708_SOC_HIFIBERRY_AMP) || defined(CONFIG_SND_BCM2708_SOC_HIFIBERRY_AMP_MODULE)
-static struct platform_device snd_hifiberry_amp_device = {
-        .name = "snd-hifiberry-amp",
-        .id = 0,
-        .num_resources = 0,
-};
-
-static struct i2c_board_info __initdata snd_tas5713_i2c_devices[] = {
-        {
-                I2C_BOARD_INFO("tas5713", 0x1b)
-        },
-};
-#endif
-
 #if defined(CONFIG_SND_BCM2708_SOC_RPI_DAC) || defined(CONFIG_SND_BCM2708_SOC_RPI_DAC_MODULE)
 static struct platform_device snd_rpi_dac_device = {
         .name = "snd-rpi-dac",
@@ -714,22 +665,6 @@ static struct platform_device snd_pcm1794a_codec_device = {
         .name = "pcm1794a-codec",
         .id = -1,
         .num_resources = 0,
-};
-#endif
-
-
-#if defined(CONFIG_SND_BCM2708_SOC_IQAUDIO_DAC) || defined(CONFIG_SND_BCM2708_SOC_IQAUDIO_DAC_MODULE)
-static struct platform_device snd_rpi_iqaudio_dac_device = {
-        .name = "snd-rpi-iqaudio-dac",
-        .id = 0,
-        .num_resources = 0,
-};
-
-// Use the actual device name rather than generic driver name
-static struct i2c_board_info __initdata snd_pcm512x_i2c_devices[] = {
-	{
-		I2C_BOARD_INFO("pcm5122", 0x4c)
-	},
 };
 #endif
 
@@ -745,16 +680,6 @@ int __init bcm_register_device(struct platform_device *pdev)
 	return ret;
 }
 
-/*
- * Use these macros for platform and i2c devices that are present in the
- * Device Tree. This way the devices are only added on non-DT systems.
- */
-#define bcm_register_device_dt(pdev) \
-    if (!use_dt) bcm_register_device(pdev)
-
-#define i2c_register_board_info_dt(busnum, info, n) \
-    if (!use_dt) i2c_register_board_info(busnum, info, n)
-
 int calc_rsts(int partition)
 {
 	return PM_PASSWORD |
@@ -766,20 +691,19 @@ int calc_rsts(int partition)
 		((partition & (1 << 5))  << 5);
 }
 
-static void bcm2708_restart(enum reboot_mode mode, const char *cmd)
+static void bcm2708_restart(char mode, const char *cmd)
 {
-	extern char bcm2708_reboot_mode;
 	uint32_t pm_rstc, pm_wdog;
 	uint32_t timeout = 10;
 	uint32_t pm_rsts = 0;
 
-	if(bcm2708_reboot_mode == 'q')
+	if(mode == 'q')
 	{
 		// NOOBS < 1.3 booting with reboot=q
 		pm_rsts = readl(__io_address(PM_RSTS));
 		pm_rsts = PM_PASSWORD | pm_rsts | PM_RSTS_HADWRQ_SET;
 	}
-	else if(bcm2708_reboot_mode == 'p')
+	else if(mode == 'p')
 	{
 		// NOOBS < 1.3 halting
 		pm_rsts = readl(__io_address(PM_RSTS));
@@ -805,8 +729,9 @@ static void bcm2708_restart(enum reboot_mode mode, const char *cmd)
 /* We can't really power off, but if we do the normal reset scheme, and indicate to bootcode.bin not to reboot, then most of the chip will be powered off */
 static void bcm2708_power_off(void)
 {
-	extern char bcm2708_reboot_mode;
-	if(bcm2708_reboot_mode == 'q')
+	extern char reboot_mode;
+
+	if(reboot_mode == 'q')
 	{
 		// NOOBS < v1.3
 		bcm2708_restart('p', "");
@@ -820,24 +745,6 @@ static void bcm2708_power_off(void)
 	}
 }
 
-#ifdef CONFIG_OF
-static void __init bcm2708_dt_init(void)
-{
-	int ret;
-
-	of_clk_init(NULL);
-	ret = of_platform_populate(NULL, of_default_bus_match_table, NULL, NULL);
-	if (ret) {
-		pr_err("of_platform_populate failed: %d\n", ret);
-		/* Proceed as if CONFIG_OF was not defined */
-	} else {
-		use_dt = 1;
-	}
-}
-#else
-static void __init bcm2708_dt_init(void) { }
-#endif /* CONFIG_OF */
-
 void __init bcm2708_init(void)
 {
 	int i;
@@ -848,90 +755,59 @@ void __init bcm2708_init(void)
 	printk("bcm2708.uart_clock = %d\n", uart_clock);
 	pm_power_off = bcm2708_power_off;
 
-	bcm2708_init_clocks();
-	bcm2708_dt_init();
+	if (uart_clock)
+		lookups[0].clk->rate = uart_clock;
+
+	for (i = 0; i < ARRAY_SIZE(lookups); i++)
+		clkdev_add(&lookups[i]);
 
 	bcm_register_device(&bcm2708_dmaman_device);
 	bcm_register_device(&bcm2708_vcio_device);
 #ifdef CONFIG_BCM2708_GPIO
-	bcm_register_device_dt(&bcm2708_gpio_device);
+	bcm_register_device(&bcm2708_gpio_device);
 #endif
-
-#if defined(CONFIG_PPS_CLIENT_GPIO) || defined(CONFIG_PPS_CLIENT_GPIO_MODULE)
-	if (!use_dt && (pps_gpio_pin >= 0)) {
-		pr_info("bcm2708: GPIO %d setup as pps-gpio device\n", pps_gpio_pin);
-		pps_gpio_info.gpio_pin = pps_gpio_pin;
-		pps_gpio_device.id = pps_gpio_pin;
-		bcm_register_device(&pps_gpio_device);
-	}
-#endif
-
 #if defined(CONFIG_W1_MASTER_GPIO) || defined(CONFIG_W1_MASTER_GPIO_MODULE)
 	w1_gpio_pdata.pin = w1_gpio_pin;
-	w1_gpio_pdata.ext_pullup_enable_pin = w1_gpio_pullup;
-	bcm_register_device_dt(&w1_device);
+	platform_device_register(&w1_device);
 #endif
 	bcm_register_device(&bcm2708_systemtimer_device);
 	bcm_register_device(&bcm2708_fb_device);
+	if (!fiq_fix_enable)
+	{
+		bcm2708_usb_device.resource = bcm2708_usb_resources_no_fiq_fix;
+		bcm2708_usb_device.num_resources = ARRAY_SIZE(bcm2708_usb_resources_no_fiq_fix);
+	}
 	bcm_register_device(&bcm2708_usb_device);
 	bcm_register_device(&bcm2708_uart1_device);
 	bcm_register_device(&bcm2708_powerman_device);
 
-#ifdef CONFIG_MMC_BCM2835
-	bcm_register_device(&bcm2835_emmc_device);
+#ifdef CONFIG_MMC_SDHCI_BCM2708
+	bcm_register_device(&bcm2708_emmc_device);
 #endif
 	bcm2708_init_led();
 	for (i = 0; i < ARRAY_SIZE(bcm2708_alsa_devices); i++)
 		bcm_register_device(&bcm2708_alsa_devices[i]);
 
+	bcm_register_device(&bcm2708_spi_device);
+	bcm_register_device(&bcm2708_bsc0_device);
+	bcm_register_device(&bcm2708_bsc1_device);
+
 	bcm_register_device(&bcm2835_hwmon_device);
 	bcm_register_device(&bcm2835_thermal_device);
 
-	bcm_register_device_dt(&bcm2708_spi_device);
-
-	if (vc_i2c_override) {
-		bcm_register_device_dt(&bcm2708_bsc0_device);
-		bcm_register_device_dt(&bcm2708_bsc1_device);
-	} else if ((boardrev & 0xffffff) == 0x2 || (boardrev & 0xffffff) == 0x3) {
-		bcm_register_device_dt(&bcm2708_bsc0_device);
-	} else {
-		bcm_register_device_dt(&bcm2708_bsc1_device);
-	}
-
-#if defined(CONFIG_SND_BCM2708_SOC_I2S) || defined(CONFIG_SND_BCM2708_SOC_I2S_MODULE)
-	bcm_register_device_dt(&bcm2708_i2s_device);
+#ifdef CONFIG_SND_BCM2708_SOC_I2S_MODULE
+	bcm_register_device(&bcm2708_i2s_device);
 #endif
 
 #if defined(CONFIG_SND_BCM2708_SOC_HIFIBERRY_DAC) || defined(CONFIG_SND_BCM2708_SOC_HIFIBERRY_DAC_MODULE)
-        bcm_register_device_dt(&snd_hifiberry_dac_device);
-        bcm_register_device_dt(&snd_pcm5102a_codec_device);
-#endif
-
-#if defined(CONFIG_SND_BCM2708_SOC_HIFIBERRY_DACPLUS) || defined(CONFIG_SND_BCM2708_SOC_HIFIBERRY_DACPLUS_MODULE)
-        bcm_register_device_dt(&snd_rpi_hifiberry_dacplus_device);
-        i2c_register_board_info_dt(1, snd_pcm512x_hbdacplus_i2c_devices, ARRAY_SIZE(snd_pcm512x_hbdacplus_i2c_devices));
-#endif
-
-#if defined(CONFIG_SND_BCM2708_SOC_HIFIBERRY_DIGI) || defined(CONFIG_SND_BCM2708_SOC_HIFIBERRY_DIGI_MODULE)
-        bcm_register_device_dt(&snd_hifiberry_digi_device);
-        i2c_register_board_info_dt(1, snd_wm8804_i2c_devices, ARRAY_SIZE(snd_wm8804_i2c_devices));
-#endif
-
-#if defined(CONFIG_SND_BCM2708_SOC_HIFIBERRY_AMP) || defined(CONFIG_SND_BCM2708_SOC_HIFIBERRY_AMP_MODULE)
-        bcm_register_device_dt(&snd_hifiberry_amp_device);
-        i2c_register_board_info_dt(1, snd_tas5713_i2c_devices, ARRAY_SIZE(snd_tas5713_i2c_devices));
+        bcm_register_device(&snd_hifiberry_dac_device);
+        bcm_register_device(&snd_pcm5102a_codec_device);
 #endif
 
 #if defined(CONFIG_SND_BCM2708_SOC_RPI_DAC) || defined(CONFIG_SND_BCM2708_SOC_RPI_DAC_MODULE)
-        bcm_register_device_dt(&snd_rpi_dac_device);
-        bcm_register_device_dt(&snd_pcm1794a_codec_device);
+        bcm_register_device(&snd_rpi_dac_device);
+        bcm_register_device(&snd_pcm1794a_codec_device);
 #endif
-
-#if defined(CONFIG_SND_BCM2708_SOC_IQAUDIO_DAC) || defined(CONFIG_SND_BCM2708_SOC_IQAUDIO_DAC_MODULE)
-        bcm_register_device_dt(&snd_rpi_iqaudio_dac_device);
-        i2c_register_board_info_dt(1, snd_pcm512x_i2c_devices, ARRAY_SIZE(snd_pcm512x_i2c_devices));
-#endif
-
 
 	for (i = 0; i < ARRAY_SIZE(amba_devs); i++) {
 		struct amba_device *d = amba_devs[i];
@@ -941,9 +817,8 @@ void __init bcm2708_init(void)
 	system_serial_low = serial;
 
 #ifdef CONFIG_BCM2708_SPIDEV
-	if (!use_dt)
-	    spi_register_board_info(bcm2708_spi_devices,
-				    ARRAY_SIZE(bcm2708_spi_devices));
+	spi_register_board_info(bcm2708_spi_devices,
+			ARRAY_SIZE(bcm2708_spi_devices));
 #endif
 }
 
@@ -971,13 +846,9 @@ static int timer_set_next_event(unsigned long cycles,
 				struct clock_event_device *unused)
 {
 	unsigned long stc;
-	do {
-		stc = readl(__io_address(ST_BASE + 0x04));
-		/* We could take a FIQ here, which may push ST above STC3 */
-		writel(stc + cycles, __io_address(ST_BASE + 0x18));
-	} while ((signed long) cycles >= 0 &&
-				(signed long) (readl(__io_address(ST_BASE + 0x04)) - stc)
-				>= (signed long) cycles);
+
+	stc = readl(__io_address(ST_BASE + 0x04));
+	writel(stc + cycles, __io_address(ST_BASE + 0x18));	/* stc3 */
 	return 0;
 }
 
@@ -1032,7 +903,7 @@ static void __init bcm2708_timer_init(void)
 	 */
 	setup_irq(IRQ_TIMER3, &bcm2708_timer_irq);
 
-	sched_clock_register(bcm2708_read_sched_clock, 32, STC_FREQ_HZ);
+	setup_sched_clock(bcm2708_read_sched_clock, 32, STC_FREQ_HZ);
 
 	timer0_clockevent.mult =
 	    div_sc(STC_FREQ_HZ, NSEC_PER_SEC, timer0_clockevent.shift);
@@ -1074,9 +945,7 @@ static struct platform_device bcm2708_led_device = {
 
 static void __init bcm2708_init_led(void)
 {
-	bcm2708_leds[0].gpio = disk_led_gpio;
-	bcm2708_leds[0].active_low = disk_led_active_low;
-	bcm_register_device_dt(&bcm2708_led_device);
+	platform_device_register(&bcm2708_led_device);
 }
 #else
 static inline void bcm2708_init_led(void)
@@ -1101,11 +970,6 @@ static void __init board_reserve(void)
 #endif
 }
 
-static const char * const bcm2708_compat[] = {
-	"brcm,bcm2708",
-	NULL
-};
-
 MACHINE_START(BCM2708, "BCM2708")
     /* Maintainer: Broadcom Europe Ltd. */
 	.map_io = bcm2708_map_io,
@@ -1113,20 +977,12 @@ MACHINE_START(BCM2708, "BCM2708")
 	.init_time = bcm2708_timer_init,
 	.init_machine = bcm2708_init,
 	.init_early = bcm2708_init_early,
+	.restart = bcm2708_restart,
 	.reserve = board_reserve,
-	.restart	= bcm2708_restart,
-	.dt_compat = bcm2708_compat,
 MACHINE_END
 
 module_param(boardrev, uint, 0644);
 module_param(serial, uint, 0644);
 module_param(uart_clock, uint, 0644);
-module_param(disk_led_gpio, uint, 0644);
-module_param(disk_led_active_low, uint, 0644);
 module_param(reboot_part, uint, 0644);
 module_param(w1_gpio_pin, uint, 0644);
-module_param(w1_gpio_pullup, uint, 0644);
-module_param(pps_gpio_pin, int, 0644);
-MODULE_PARM_DESC(pps_gpio_pin, "Set GPIO pin to reserve for PPS");
-module_param(vc_i2c_override, bool, 0644);
-MODULE_PARM_DESC(vc_i2c_override, "Allow the use of VC's I2C peripheral.");

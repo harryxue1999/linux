@@ -11,7 +11,6 @@
 
 #include <linux/spinlock.h>
 #include <linux/module.h>
-#include <linux/delay.h>
 #include <linux/list.h>
 #include <linux/io.h>
 #include <linux/irq.h>
@@ -21,9 +20,6 @@
 #include <linux/gpio.h>
 #include <linux/platform_device.h>
 #include <mach/platform.h>
-#include <linux/pinctrl/consumer.h>
-
-#include <linux/platform_data/bcm2708.h>
 
 #define BCM_GPIO_DRIVER_NAME "bcm2708_gpio"
 #define DRIVER_NAME BCM_GPIO_DRIVER_NAME
@@ -43,8 +39,6 @@
 #define GPIOUD(x)    (0x94+(x)*4)
 #define GPIOUDCLK(x) (0x98+(x)*4)
 
-#define GPIO_BANKS 2
-
 enum { GPIO_FSEL_INPUT, GPIO_FSEL_OUTPUT,
 	GPIO_FSEL_ALT5, GPIO_FSEL_ALT_4,
 	GPIO_FSEL_ALT0, GPIO_FSEL_ALT1,
@@ -62,10 +56,8 @@ struct bcm2708_gpio {
 	struct list_head list;
 	void __iomem *base;
 	struct gpio_chip gc;
-	unsigned long rising[(BCM2708_NR_GPIOS + 31) / 32];
-	unsigned long falling[(BCM2708_NR_GPIOS + 31) / 32];
-	unsigned long high[(BCM2708_NR_GPIOS + 31) / 32];
-	unsigned long low[(BCM2708_NR_GPIOS + 31) / 32];
+	unsigned long rising;
+	unsigned long falling;
 };
 
 static int bcm2708_set_function(struct gpio_chip *gc, unsigned offset,
@@ -78,7 +70,7 @@ static int bcm2708_set_function(struct gpio_chip *gc, unsigned offset,
 	unsigned gpio_field_offset = (offset - 10 * gpio_bank) * 3;
 
 //printk(KERN_ERR DRIVER_NAME ": bcm2708_gpio_set_function %p (%d,%d)\n", gc, offset, function);
-	if (offset >= BCM2708_NR_GPIOS)
+	if (offset >= ARCH_NR_GPIOS)
 		return -EINVAL;
 
 	spin_lock_irqsave(&lock, flags);
@@ -116,7 +108,7 @@ static int bcm2708_gpio_get(struct gpio_chip *gc, unsigned offset)
 	unsigned gpio_field_offset = (offset - 32 * gpio_bank);
 	unsigned lev;
 
-	if (offset >= BCM2708_NR_GPIOS)
+	if (offset >= ARCH_NR_GPIOS)
 		return 0;
 	lev = readl(gpio->base + GPIOLEV(gpio_bank));
 //printk(KERN_ERR DRIVER_NAME ": bcm2708_gpio_get %p (%d)=%d\n", gc, offset, 0x1 & (lev>>gpio_field_offset));
@@ -129,48 +121,13 @@ static void bcm2708_gpio_set(struct gpio_chip *gc, unsigned offset, int value)
 	unsigned gpio_bank = offset / 32;
 	unsigned gpio_field_offset = (offset - 32 * gpio_bank);
 //printk(KERN_ERR DRIVER_NAME ": bcm2708_gpio_set %p (%d=%d)\n", gc, offset, value);
-	if (offset >= BCM2708_NR_GPIOS)
+	if (offset >= ARCH_NR_GPIOS)
 		return;
 	if (value)
 		writel(1 << gpio_field_offset, gpio->base + GPIOSET(gpio_bank));
 	else
 		writel(1 << gpio_field_offset, gpio->base + GPIOCLR(gpio_bank));
 }
-
-/**********************
- * extension to configure pullups
- */
-int bcm2708_gpio_setpull(struct gpio_chip *gc, unsigned offset,
-		bcm2708_gpio_pull_t value)
-{
-	struct bcm2708_gpio *gpio = container_of(gc, struct bcm2708_gpio, gc);
-	unsigned gpio_bank = offset / 32;
-	unsigned gpio_field_offset = (offset - 32 * gpio_bank);
-
-	if (offset >= BCM2708_NR_GPIOS)
-		return -EINVAL;
-
-	switch (value) {
-	case BCM2708_PULL_UP:
-		writel(2, gpio->base + GPIOUD(0));
-		break;
-	case BCM2708_PULL_DOWN:
-		writel(1, gpio->base + GPIOUD(0));
-		break;
-	case BCM2708_PULL_OFF:
-		writel(0, gpio->base + GPIOUD(0));
-		break;
-	}
-
-	udelay(5);
-	writel(1 << gpio_field_offset, gpio->base + GPIOUDCLK(gpio_bank));
-	udelay(5);
-	writel(0, gpio->base + GPIOUD(0));
-	writel(0 << gpio_field_offset, gpio->base + GPIOUDCLK(gpio_bank));
-
-	return 0;
-}
-EXPORT_SYMBOL(bcm2708_gpio_setpull);
 
 /*************************************************************************************************************************
  * bcm2708 GPIO IRQ
@@ -187,26 +144,21 @@ static int bcm2708_gpio_irq_set_type(struct irq_data *d, unsigned type)
 {
 	unsigned irq = d->irq;
 	struct bcm2708_gpio *gpio = irq_get_chip_data(irq);
-	unsigned gn = irq_to_gpio(irq);
-	unsigned gb = gn / 32;
-	unsigned go = gn % 32;
 
-	gpio->rising[gb]  &= ~(1 << go);
-	gpio->falling[gb] &= ~(1 << go);
-	gpio->high[gb]    &= ~(1 << go);
-	gpio->low[gb]     &= ~(1 << go);
-
-	if (type & ~(IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING | IRQ_TYPE_LEVEL_LOW | IRQ_TYPE_LEVEL_HIGH))
+	if (type & ~(IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING))
 		return -EINVAL;
 
-	if (type & IRQ_TYPE_EDGE_RISING)
-		gpio->rising[gb] |= (1 << go);
-	if (type & IRQ_TYPE_EDGE_FALLING)
-		gpio->falling[gb] |= (1 << go);
-	if (type & IRQ_TYPE_LEVEL_HIGH)
-		gpio->high[gb] |= (1 << go);
-	if (type & IRQ_TYPE_LEVEL_LOW)
-		gpio->low[gb] |= (1 << go);
+	if (type & IRQ_TYPE_EDGE_RISING) {
+		gpio->rising |= (1 << irq_to_gpio(irq));
+	} else {
+		gpio->rising &= ~(1 << irq_to_gpio(irq));
+	}
+
+	if (type & IRQ_TYPE_EDGE_FALLING) {
+		gpio->falling |= (1 << irq_to_gpio(irq));
+	} else {
+		gpio->falling &= ~(1 << irq_to_gpio(irq));
+	}
 	return 0;
 }
 
@@ -216,17 +168,13 @@ static void bcm2708_gpio_irq_mask(struct irq_data *d)
 	struct bcm2708_gpio *gpio = irq_get_chip_data(irq);
 	unsigned gn = irq_to_gpio(irq);
 	unsigned gb = gn / 32;
-	unsigned long rising  = readl(gpio->base + GPIOREN(gb));
+	unsigned long rising = readl(gpio->base + GPIOREN(gb));
 	unsigned long falling = readl(gpio->base + GPIOFEN(gb));
-	unsigned long high    = readl(gpio->base + GPIOHEN(gb));
-	unsigned long low     = readl(gpio->base + GPIOLEN(gb));
 
 	gn = gn % 32;
 
-	writel(rising  & ~(1 << gn), gpio->base + GPIOREN(gb));
+	writel(rising & ~(1 << gn), gpio->base + GPIOREN(gb));
 	writel(falling & ~(1 << gn), gpio->base + GPIOFEN(gb));
-	writel(high    & ~(1 << gn), gpio->base + GPIOHEN(gb));
-	writel(low     & ~(1 << gn), gpio->base + GPIOLEN(gb));
 }
 
 static void bcm2708_gpio_irq_unmask(struct irq_data *d)
@@ -235,34 +183,23 @@ static void bcm2708_gpio_irq_unmask(struct irq_data *d)
 	struct bcm2708_gpio *gpio = irq_get_chip_data(irq);
 	unsigned gn = irq_to_gpio(irq);
 	unsigned gb = gn / 32;
-	unsigned go = gn % 32;
-	unsigned long rising  = readl(gpio->base + GPIOREN(gb));
+	unsigned long rising = readl(gpio->base + GPIOREN(gb));
 	unsigned long falling = readl(gpio->base + GPIOFEN(gb));
-	unsigned long high    = readl(gpio->base + GPIOHEN(gb));
-	unsigned long low     = readl(gpio->base + GPIOLEN(gb));
 
-	if (gpio->rising[gb] & (1 << go)) {
-		writel(rising |  (1 << go), gpio->base + GPIOREN(gb));
+	gn = gn % 32;
+
+	writel(1 << gn, gpio->base + GPIOEDS(gb));
+
+	if (gpio->rising & (1 << gn)) {
+		writel(rising | (1 << gn), gpio->base + GPIOREN(gb));
 	} else {
-		writel(rising & ~(1 << go), gpio->base + GPIOREN(gb));
+		writel(rising & ~(1 << gn), gpio->base + GPIOREN(gb));
 	}
 
-	if (gpio->falling[gb] & (1 << go)) {
-		writel(falling |  (1 << go), gpio->base + GPIOFEN(gb));
+	if (gpio->falling & (1 << gn)) {
+		writel(falling | (1 << gn), gpio->base + GPIOFEN(gb));
 	} else {
-		writel(falling & ~(1 << go), gpio->base + GPIOFEN(gb));
-	}
-
-	if (gpio->high[gb] & (1 << go)) {
-		writel(high |  (1 << go), gpio->base + GPIOHEN(gb));
-	} else {
-		writel(high & ~(1 << go), gpio->base + GPIOHEN(gb));
-	}
-
-	if (gpio->low[gb] & (1 << go)) {
-		writel(low |  (1 << go), gpio->base + GPIOLEN(gb));
-	} else {
-		writel(low & ~(1 << go), gpio->base + GPIOLEN(gb));
+		writel(falling & ~(1 << gn), gpio->base + GPIOFEN(gb));
 	}
 }
 
@@ -281,25 +218,13 @@ static irqreturn_t bcm2708_gpio_interrupt(int irq, void *dev_id)
 	unsigned bank;
 	int i;
 	unsigned gpio;
-	unsigned level_bits;
-	struct bcm2708_gpio *gpio_data = dev_id;
-
-	for (bank = 0; bank < GPIO_BANKS; bank++) {
+	for (bank = 0; bank <= 1; bank++) {
 		edsr = readl(__io_address(GPIO_BASE) + GPIOEDS(bank));
-		level_bits = gpio_data->high[bank] | gpio_data->low[bank];
-
 		for_each_set_bit(i, &edsr, 32) {
 			gpio = i + bank * 32;
-			/* ack edge triggered IRQs immediately */
-			if (!(level_bits & (1<<i)))
-				writel(1<<i,
-				       __io_address(GPIO_BASE) + GPIOEDS(bank));
 			generic_handle_irq(gpio_to_irq(gpio));
-			/* ack level triggered IRQ after handling them */
-			if (level_bits & (1<<i))
-				writel(1<<i,
-				       __io_address(GPIO_BASE) + GPIOEDS(bank));
 		}
+		writel(0xffffffff, __io_address(GPIO_BASE) + GPIOEDS(bank));
 	}
 	return IRQ_HANDLED;
 }
@@ -318,12 +243,9 @@ static void bcm2708_gpio_irq_init(struct bcm2708_gpio *ucb)
 
 	for (irq = GPIO_IRQ_START; irq < (GPIO_IRQ_START + GPIO_IRQS); irq++) {
 		irq_set_chip_data(irq, ucb);
-		irq_set_chip_and_handler(irq, &bcm2708_irqchip,
-					 handle_simple_irq);
+		irq_set_chip(irq, &bcm2708_irqchip);
 		set_irq_flags(irq, IRQF_VALID);
 	}
-
-	bcm2708_gpio_irq.dev_id = ucb;
 	setup_irq(IRQ_GPIO3, &bcm2708_gpio_irq);
 }
 
@@ -339,7 +261,6 @@ static int bcm2708_gpio_probe(struct platform_device *dev)
 {
 	struct bcm2708_gpio *ucb;
 	struct resource *res;
-	int bank;
 	int err = 0;
 
 	printk(KERN_INFO DRIVER_NAME ": bcm2708_gpio_probe %p\n", dev);
@@ -359,7 +280,7 @@ static int bcm2708_gpio_probe(struct platform_device *dev)
 
 	ucb->gc.label = "bcm2708_gpio";
 	ucb->gc.base = 0;
-	ucb->gc.ngpio = BCM2708_NR_GPIOS;
+	ucb->gc.ngpio = ARCH_NR_GPIOS;
 	ucb->gc.owner = THIS_MODULE;
 
 	ucb->gc.direction_input = bcm2708_gpio_dir_in;
@@ -368,19 +289,11 @@ static int bcm2708_gpio_probe(struct platform_device *dev)
 	ucb->gc.set = bcm2708_gpio_set;
 	ucb->gc.can_sleep = 0;
 
-	for (bank = 0; bank < GPIO_BANKS; bank++) {
-		writel(0, ucb->base + GPIOREN(bank));
-		writel(0, ucb->base + GPIOFEN(bank));
-		writel(0, ucb->base + GPIOHEN(bank));
-		writel(0, ucb->base + GPIOLEN(bank));
-		writel(0, ucb->base + GPIOAREN(bank));
-		writel(0, ucb->base + GPIOAFEN(bank));
-		writel(~0, ucb->base + GPIOEDS(bank));
-	}
-
 	bcm2708_gpio_irq_init(ucb);
 
 	err = gpiochip_add(&ucb->gc);
+	if (err)
+		goto err;
 
 err:
 	return err;
@@ -394,7 +307,7 @@ static int bcm2708_gpio_remove(struct platform_device *dev)
 
 	printk(KERN_ERR DRIVER_NAME ": bcm2708_gpio_remove %p\n", dev);
 
-	gpiochip_remove(&ucb->gc);
+	err = gpiochip_remove(&ucb->gc);
 
 	platform_set_drvdata(dev, NULL);
 	kfree(ucb);

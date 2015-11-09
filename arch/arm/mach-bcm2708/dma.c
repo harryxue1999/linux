@@ -83,14 +83,6 @@ extern void bcm_dma_wait_idle(void __iomem *dma_chan_base)
 
 EXPORT_SYMBOL_GPL(bcm_dma_start);
 
-extern bool bcm_dma_is_busy(void __iomem *dma_chan_base)
-{
-	dsb();
-
-	return readl(dma_chan_base + BCM2708_DMA_CS) & BCM2708_DMA_ACTIVE;
-}
-EXPORT_SYMBOL_GPL(bcm_dma_is_busy);
-
 /* Complete an ongoing DMA (assuming its results are to be ignored)
    Does nothing if there is no DMA in progress.
    This routine waits for the current AXI transfer to complete before
@@ -156,8 +148,6 @@ static void vc_dmaman_init(struct vc_dmaman *dmaman, void __iomem *dma_base,
 	dmaman->chan_available = chans_available;
 	dmaman->has_feature[BCM_DMA_FEATURE_FAST_ORD] = 0x0c;  /* chans 2 & 3 */
 	dmaman->has_feature[BCM_DMA_FEATURE_BULK_ORD] = 0x01;  /* chan 0 */
-	dmaman->has_feature[BCM_DMA_FEATURE_NORMAL_ORD] = 0xfe;  /* chans 1 to 7 */
-	dmaman->has_feature[BCM_DMA_FEATURE_LITE_ORD] = 0x7f00;  /* chans 8 to 14 */
 }
 
 static int vc_dmaman_chan_alloc(struct vc_dmaman *dmaman,

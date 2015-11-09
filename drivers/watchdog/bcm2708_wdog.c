@@ -26,6 +26,8 @@
 #include <linux/uaccess.h>
 #include <mach/platform.h>
 
+#include <asm/system.h>
+
 #define SECS_TO_WDOG_TICKS(x) ((x) << 16)
 #define WDOG_TICKS_TO_SECS(x) ((x) >> 16)
 
@@ -64,7 +66,7 @@ static int wdog_start(unsigned long timeout)
 	spin_lock_irqsave(&wdog_lock, flags);
 
 	/* enable the watchdog */
-	iowrite32(PM_PASSWORD | (timeout & PM_WDOG_TIME_SET),
+	iowrite32(PM_PASSWORD | (timeout & PM_WDOG_TIME_SET), 
 		  __io_address(PM_WDOG));
 	cur = ioread32(__io_address(PM_RSTC));
 	iowrite32(PM_PASSWORD | (cur & PM_RSTC_WRCFG_CLR) |
@@ -120,7 +122,7 @@ static int wdog_set_heartbeat(int t)
  *	@ppos: pointer to the position to write. No seeks allowed
  *
  *	A write to a watchdog device is defined as a keepalive signal.
- *
+ *	
  *      if 'nowayout' is set then normally a close() is ignored. But
  *      if you write 'V' first then the close() will stop the timer.
  */
@@ -342,7 +344,7 @@ static int __init wdog_init(void)
 	if (wdog_set_heartbeat(heartbeat)) {
 		wdog_set_heartbeat(WD_TIMO);
 		printk(KERN_INFO "bcm2708_wdog: heartbeat value must be "
-			"0 < heartbeat < %d, using %d\n",
+			"0 < heartbeat < %d, using %d\n", 
 				WDOG_TICKS_TO_SECS(PM_WDOG_TIME_SET),
 				WD_TIMO);
 	}
@@ -380,3 +382,4 @@ MODULE_DESCRIPTION("Driver for BCM2708 watchdog");
 MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);
 MODULE_ALIAS_MISCDEV(TEMP_MINOR);
 MODULE_LICENSE("GPL");
+

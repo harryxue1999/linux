@@ -5,7 +5,7 @@
 * agreement governing use of this software, this software is licensed to you
 * under the terms of the GNU General Public License version 2, available at
 * http://www.broadcom.com/licenses/GPLv2.php (the "GPL").
-*
+*	
 * Notwithstanding the above, under no circumstances may you combine this
 * software in any way with any other Broadcom software provided under a
 * license other than the GPL, without Broadcom's express prior written
@@ -99,12 +99,12 @@ static int snd_bcm2835_alsa_probe(struct platform_device *pdev)
 	if (dev > 0)
 		goto add_register_map;
 
-	err = snd_card_new(NULL, index[dev], id[dev], THIS_MODULE, 0, &g_card);
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &g_card);
 	if (err < 0)
 		goto out;
 
 	snd_card_set_dev(g_card, &pdev->dev);
-	strcpy(g_card->driver, "bcm2835");
+	strcpy(g_card->driver, "BRCM bcm2835 ALSA Driver");
 	strcpy(g_card->shortname, "bcm2835 ALSA");
 	sprintf(g_card->longname, "%s", g_card->shortname);
 
@@ -119,12 +119,6 @@ static int snd_bcm2835_alsa_probe(struct platform_device *pdev)
 	if (err < 0) {
 		dev_err(&pdev->dev, "Failed to create new BCM2835 pcm device\n");
 		goto out_bcm2835_new_pcm;
-	}
-
-	err = snd_bcm2835_new_spdif_pcm(chip);
-	if (err < 0) {
-		dev_err(&pdev->dev, "Failed to create new BCM2835 spdif pcm device\n");
-		goto out_bcm2835_new_spdif;
 	}
 
 	err = snd_bcm2835_new_ctl(chip);
@@ -162,7 +156,6 @@ add_register_map:
 
 out_card_register:
 out_bcm2835_new_ctl:
-out_bcm2835_new_spdif:
 out_bcm2835_new_pcm:
 out_bcm2835_create:
 	BUG_ON(!g_card);

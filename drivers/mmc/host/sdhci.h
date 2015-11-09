@@ -72,7 +72,6 @@
 #define  SDHCI_WRITE_PROTECT	0x00080000
 #define  SDHCI_DATA_LVL_MASK	0x00F00000
 #define   SDHCI_DATA_LVL_SHIFT	20
-#define   SDHCI_DATA_0_LVL_MASK	0x00100000
 
 #define SDHCI_HOST_CONTROL	0x28
 #define  SDHCI_CTRL_LED		0x01
@@ -282,20 +281,31 @@ struct sdhci_ops {
 	unsigned int	(*get_max_clock)(struct sdhci_host *host);
 	unsigned int	(*get_min_clock)(struct sdhci_host *host);
 	unsigned int	(*get_timeout_clock)(struct sdhci_host *host);
-	unsigned int	(*get_max_timeout_count)(struct sdhci_host *host);
-	void		(*set_timeout)(struct sdhci_host *host,
-				       struct mmc_command *cmd);
-	void		(*set_bus_width)(struct sdhci_host *host, int width);
+	int		(*platform_bus_width)(struct sdhci_host *host,
+					       int width);
 	void (*platform_send_init_74_clocks)(struct sdhci_host *host,
 					     u8 power_mode);
 	unsigned int    (*get_ro)(struct sdhci_host *host);
-	void		(*reset)(struct sdhci_host *host, u8 mask);
-	int	(*platform_execute_tuning)(struct sdhci_host *host, u32 opcode);
-	void	(*set_uhs_signaling)(struct sdhci_host *host, unsigned int uhs);
+	void	(*platform_reset_enter)(struct sdhci_host *host, u8 mask);
+	void	(*platform_reset_exit)(struct sdhci_host *host, u8 mask);
+	int	(*set_uhs_signaling)(struct sdhci_host *host, unsigned int uhs);
+
+	int             (*pdma_able)(struct sdhci_host *host,
+				     struct mmc_data *data);
+	void            (*pdma_avail)(struct sdhci_host *host,
+				      unsigned int *ref_intmask,
+				      void(*complete)(struct sdhci_host *));
+	void            (*pdma_reset)(struct sdhci_host *host,
+				      struct mmc_data *data);
+	unsigned int 	(*extra_ints)(struct sdhci_host *host);
+	unsigned int	(*spurious_crc_acmd51)(struct sdhci_host *host);
+	unsigned int	(*missing_status)(struct sdhci_host *host);
+
 	void	(*hw_reset)(struct sdhci_host *host);
+	void	(*platform_suspend)(struct sdhci_host *host);
+	void	(*platform_resume)(struct sdhci_host *host);
 	void    (*adma_workaround)(struct sdhci_host *host, u32 intmask);
 	void	(*platform_init)(struct sdhci_host *host);
-	void    (*card_event)(struct sdhci_host *host);
 };
 
 #ifdef CONFIG_MMC_SDHCI_IO_ACCESSORS
@@ -394,18 +404,6 @@ static inline void *sdhci_priv(struct sdhci_host *host)
 extern void sdhci_card_detect(struct sdhci_host *host);
 extern int sdhci_add_host(struct sdhci_host *host);
 extern void sdhci_remove_host(struct sdhci_host *host, int dead);
-extern void sdhci_send_command(struct sdhci_host *host,
-				struct mmc_command *cmd);
-
-static inline bool sdhci_sdio_irq_enabled(struct sdhci_host *host)
-{
-	return !!(host->flags & SDHCI_SDIO_IRQ_ENABLED);
-}
-
-void sdhci_set_clock(struct sdhci_host *host, unsigned int clock);
-void sdhci_set_bus_width(struct sdhci_host *host, int width);
-void sdhci_reset(struct sdhci_host *host, u8 mask);
-void sdhci_set_uhs_signaling(struct sdhci_host *host, unsigned timing);
 
 #ifdef CONFIG_PM
 extern int sdhci_suspend_host(struct sdhci_host *host);
@@ -413,9 +411,38 @@ extern int sdhci_resume_host(struct sdhci_host *host);
 extern void sdhci_enable_irq_wakeups(struct sdhci_host *host);
 #endif
 
+static inline int /*bool*/
+sdhci_platdma_dmaable(struct sdhci_host *host, struct mmc_data *data)
+{
+	if (host->ops->pdma_able)
+		return host->ops->pdma_able(host, data);
+	else
+		return 1;
+}
+static inline void
+sdhci_platdma_avail(struct sdhci_host *host, unsigned int *ref_intmask,
+		void(*completion_callback)(struct sdhci_host *))
+{
+	if (host->ops->pdma_avail)
+		host->ops->pdma_avail(host, ref_intmask, completion_callback);
+}
+
+static inline void
+sdhci_platdma_reset(struct sdhci_host *host, struct mmc_data *data)
+{
+	if (host->ops->pdma_reset)
+		host->ops->pdma_reset(host, data);
+}
+   
 #ifdef CONFIG_PM_RUNTIME
 extern int sdhci_runtime_suspend_host(struct sdhci_host *host);
 extern int sdhci_runtime_resume_host(struct sdhci_host *host);
 #endif
+
+extern void sdhci_spin_lock_irqsave(struct sdhci_host *host,unsigned long *flags);
+extern void sdhci_spin_unlock_irqrestore(struct sdhci_host *host,unsigned long flags);
+extern void sdhci_spin_lock(struct sdhci_host *host);
+extern void sdhci_spin_unlock(struct sdhci_host *host);
+
 
 #endif /* __SDHCI_HW_H */
